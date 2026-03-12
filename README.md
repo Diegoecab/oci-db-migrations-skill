@@ -78,7 +78,8 @@ chmod +x setup.sh && ./setup.sh
 
 # 3. Create and validate your configuration
 cp migration-config.json.example migration-config.json
-# Edit with your OCIDs, credentials, and schema definitions
+# Edit with your OCIDs, usernames, and schema definitions
+# Set passwords via env vars (see Password Resolution section)
 ./migrate validate-config
 
 # 4. Assess pre-migration readiness
@@ -327,9 +328,15 @@ Key sections:
     "aws_oracle_prod": {
       "db_type": "oracle_rds",        // oracle_onprem | oracle_rds | oracle_exacs
       "host": "10.0.1.100",
+      "hostname": "oracle-prod.internal",  // FQDN required by DMS
       "port": 1521,
       "service_name": "ORCL",
+      "username": "dms_admin",
+      "gg_username": "GGADMIN",
       "assessment_user": "DBSNMP",    // Read-only user for pre-migration checks
+      "datapump_dir_name": "DATA_PUMP_DIR",
+      "datapump_dir_path": "/u01/app/oracle/admin/ORCL/dpdump",
+      "ssl_wallet_dir": "/u01/app/oracle/admin/ORCL/dpdump"
       // ...
     }
   },
@@ -337,6 +344,8 @@ Key sections:
   "target_databases": {
     "adb_prod": {
       "adb_ocid": "ocid1.autonomousdatabase...",
+      "username": "ADMIN",
+      "gg_username": "GGADMIN"
       // ...
     }
   },
@@ -344,6 +353,7 @@ Key sections:
   "migrations": {
     "hr_migration": {
       "migration_type": "ONLINE",           // ONLINE (with GG CDC) or OFFLINE
+      "migration_scope": "SCHEMA",          // SCHEMA or FULL
       "source_db_key": "aws_oracle_prod",
       "target_db_key": "adb_prod",
       "include_allow_objects": ["HR.*"],     // SCHEMA.* or SCHEMA.TABLE
@@ -356,6 +366,26 @@ Key sections:
 ```
 
 When using the AI skill, you don't need to write this manually. Describe your scenario and the assistant generates it.
+
+### Password Resolution
+
+Passwords are **never stored in JSON config files**. They are resolved at runtime in this order:
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | Explicit env var (from config `password_env_var`) | `MY_CUSTOM_VAR` |
+| 2 | Auto-generated env var convention | `DMS_PASSWORD_BASEDB_PDB1` |
+| 3 | Interactive prompt (`getpass` — masked input) | *(nothing shown on screen)* |
+
+Env var naming convention: `DMS_<FIELD>_<KEY>` where FIELD is `PASSWORD`, `GG_PASSWORD`, or `ASSESSMENT_PASSWORD`, and KEY is derived from the database key in config.
+
+```bash
+# Example: set passwords via environment
+export DMS_PASSWORD_BASEDB_PDB1="secret"
+export DMS_GG_PASSWORD_BASEDB_PDB1="gg_secret"
+export DMS_ASSESSMENT_PASSWORD_BASEDB_PDB1="assess_secret"
+export DMS_PASSWORD_ADB_TARGET="admin_secret"
+```
 
 ### Source Database Variants
 
@@ -425,6 +455,7 @@ After running `setup.sh`, use `./migrate` (or `python3.x migrate.py` directly):
 | `./migrate deploy --list-steps` | Show available steps |
 | `./migrate validate-migration` | Run DMS premigration advisor on all migrations |
 | `./migrate validate-migration --migration X` | Validate specific migration |
+| `./migrate validate-migration --wait` | Wait for validation to complete and show results |
 | `./migrate start-migration` | Start migration jobs (all configured migrations) |
 | `./migrate start-migration --migration X` | Start specific migration |
 | `./migrate start-migration --wait` | Start and wait for completion |
@@ -434,6 +465,8 @@ After running `setup.sh`, use `./migrate` (or `python3.x migrate.py` directly):
 | `./migrate cleanup connection "name"` | Delete a DMS connection by display name |
 | `./migrate cleanup migration "name"` | Delete a DMS migration by display name |
 | `./migrate diagnose "ORA-XXXXX"` | KB error lookup |
+| `./migrate generate-wallet-script` | Generate SSL wallet setup script for source DB |
+| `./migrate generate-wallet-script --source X` | Generate for specific source |
 
 ---
 
