@@ -311,8 +311,10 @@ Idempotent pipeline (every step checks if resources exist before creating):
 | 1 | Vault Secrets | Verify pre-created secrets exist and are ACTIVE |
 | 2 | Network NSG | Verify existing NSG is AVAILABLE with rules |
 | 3 | DMS Connections | Create source + target database connections |
-| 4 | DMS Migrations | Create migration definitions with auto-validate/start |
+| 4 | DMS Migrations | Create migration definitions with auto-validate |
 | 5 | GoldenGate | Create deployment + reverse replication (if enabled) |
+
+After deployment, use `./migrate validate-migration` to run the DMS premigration advisor and `./migrate start-migration` to start the migration jobs. These are separate commands to give you explicit control over when jobs begin.
 
 ### 5. State Monitoring
 
@@ -439,9 +441,16 @@ After running `setup.sh`, use `./migrate` (or `python3.x migrate.py` directly):
 | `./migrate deploy --step N` | Run specific step |
 | `./migrate deploy --from-step N` | Run from step N onward |
 | `./migrate deploy --list-steps` | Show available steps |
+| `./migrate validate-migration` | Run DMS premigration advisor on all migrations |
+| `./migrate validate-migration --migration X` | Validate specific migration |
+| `./migrate start-migration` | Start migration jobs (all configured migrations) |
+| `./migrate start-migration --migration X` | Start specific migration |
+| `./migrate start-migration --wait` | Start and wait for completion |
 | `./migrate status` | Show resource state |
 | `./migrate status --json` | JSON output (for AI skill) |
 | `./migrate status --migration X` | Specific migration |
+| `./migrate cleanup connection "name"` | Delete a DMS connection by display name |
+| `./migrate cleanup migration "name"` | Delete a DMS migration by display name |
 | `./migrate diagnose "ORA-XXXXX"` | KB error lookup |
 
 ---
@@ -522,6 +531,37 @@ Dynamic Group: ALL {resource.type = 'goldengatedeployment', resource.compartment
 Policy: Allow dynamic-group GGDeployments to read secret-bundles in compartment <compartment>
 ```
 
+### Source and Target Database Preparation (`dms-db-prep-v2.sh` Replacement)
+
+Oracle provides an interactive bash script (`dms-db-prep-v2.sh`) that generates SQL to prepare source and target databases for DMS migrations. **This tool replaces that script entirely** — you do not need to download or run it.
+
+The built-in assessment (`./migrate assess`) covers all checks from the Oracle script and more:
+
+| Oracle `dms-db-prep-v2.sh` | This tool (`migrate.py assess`) |
+|---|---|
+| Archive log mode | `ARCHIVELOG_MODE` — auto-skipped on RDS |
+| Force logging | `FORCE_LOGGING` — uses `rdsadmin` on RDS |
+| Supplemental logging (min) | `SUPPLEMENTAL_LOG_MIN` + `SUPPLEMENTAL_LOG_PK` + per-table `SUPPLEMENTAL_LOG_ALL_COLUMNS` |
+| Streams pool size | `STREAMS_POOL_SIZE` (min 256MB) |
+| `enable_goldengate_replication` | `ENABLE_GG_REPLICATION` |
+| Create GGADMIN user + 10 grants | `GGADMIN_EXISTS` + `GGADMIN_UNLOCKED` + `GGADMIN_PRIVILEGES` (23+ grants) |
+| `DBMS_GOLDENGATE_AUTH.GRANT_ADMIN_PRIVILEGE` | `GGADMIN_GG_AUTH` |
+| CDB/PDB user handling (`c##ggadmin`) | Multitenant support in DMS connections |
+| Global names check | Included in assessment |
+| Job queue processes | Included in assessment |
+| Data Pump directory (not in Oracle script) | `DATAPUMP_DIR` + `DATAPUMP_DIR_GRANTS` |
+| — | 20+ additional checks (schema validation, datatypes, target ADB state, OCI infra) |
+
+> **Note:** The checks in this tool were aligned with the `dms-db-prep-v2.sh` script as of February 2026. Oracle may release updated versions through My Oracle Support (MOS). It is recommended to periodically check the corresponding MOS Doc ID for newer revisions of the script and verify that no new preparation steps have been added.
+
+**Key differences from the Oracle script:**
+
+- **Non-interactive**: connects to the actual database, runs checks, and reports results — no manual Q&A
+- **Variant-aware**: adjusts automatically for on-prem, RDS (`rdsadmin` procedures), and ExaCS (`dbaascli`)
+- **Generates executable SQL**: `./migrate assess --generate-sql` produces a remediation script equivalent to the Oracle script's `DMS_Configuration.sql`
+- **Can execute fixes directly**: `./migrate assess --remediate --source <key>` applies fixes interactively with confirmation
+- **Covers both source and target**: a single command assesses all configured databases
+
 ---
 
 ## File Structure
@@ -568,9 +608,48 @@ oci-db-migrations-cli/
 │       ├── troubleshooting.md
 │       └── cutover-readiness.md
 │
+├── .claude/                           # Claude Code integration
+│   ├── settings.json                  # Deny rules + hooks (tracked in git)
+│   ├── settings.local.json            # Per-user permissions (gitignored)
+│   └── hooks/
+│       └── scope-guard.sh             # PreToolUse hook: blocks OCI ops outside DMS scope
+│
 ├── templates/                         # GG parameter file templates
 └── docs/                              # Additional documentation
 ```
+
+---
+
+## Scope & Safety
+
+The skill enforces strict boundaries on what it can create, modify, or delete. Two layers of protection ensure the AI assistant stays within its scope:
+
+### What the skill CAN manage (DMS scope)
+
+- DMS connections (source, target, CDB)
+- DMS migrations (create, validate, start)
+- GoldenGate deployments (for reverse replication)
+
+### What the skill CANNOT touch
+
+All other OCI resources must exist before the skill runs. The skill will never attempt to create, modify, or delete:
+
+- IAM policies or dynamic groups
+- VCNs, subnets, NSGs, route tables, gateways
+- Vaults or encryption keys
+- Vault secrets
+- Object Storage buckets
+- Autonomous Databases or DB Systems
+
+### How it's enforced
+
+| Layer | Mechanism | Location |
+|-------|-----------|----------|
+| **Deny rules** | Hard blocks on dangerous command patterns | `.claude/settings.json` |
+| **PreToolUse hook** | Validates every Bash command before execution | `.claude/hooks/scope-guard.sh` |
+| **SKILL.md instructions** | Behavioral guardrails in the AI system prompt | `ai/SKILL.md` |
+
+If the skill detects a command outside its scope, it blocks it with an explanation of why and what the user should do instead (e.g., "Inform your security team about the required IAM policies").
 
 ---
 

@@ -394,6 +394,171 @@ def cmd_validate_migration(args):
         print("No migrations found to validate.")
 
 
+def cmd_start_migration(args):
+    """Start (run) DMS migration jobs."""
+    config = MigrationConfig(args.config)
+    if not config.load():
+        print("❌ Configuration errors:")
+        for e in config.errors:
+            print(f"  • {e}")
+        sys.exit(1)
+
+    try:
+        from core.oci_client import OCIClientFactory
+        oci_factory = OCIClientFactory(
+            config_profile=config.oci.get("config_profile", "DEFAULT"),
+            region=config.oci.get("region"),
+        )
+    except Exception as e:
+        print(f"❌ OCI SDK required: {e}")
+        sys.exit(1)
+
+    import oci
+
+    dms = oci_factory.dms
+    compartment = config.oci["compartment_ocid"]
+    all_migs = dms.list_migrations(compartment_id=compartment).data.items
+
+    target_keys = [args.migration] if args.migration else list(config.migrations.keys())
+    results = []
+
+    for mig_key in target_keys:
+        mig_config = config.migrations.get(mig_key)
+        if not mig_config:
+            print(f"❌ Migration key '{mig_key}' not found in config")
+            continue
+
+        display_name = mig_config.get("display_name", mig_key)
+
+        dms_mig = None
+        for m in all_migs:
+            if m.display_name == display_name and m.lifecycle_state == "ACTIVE":
+                dms_mig = m
+                break
+
+        if not dms_mig:
+            print(f"❌ {display_name}: not found or not ACTIVE")
+            continue
+
+        print(f"\n🚀 {display_name}: Starting migration job...")
+        print(f"   Migration OCID: {dms_mig.id}")
+        print(f"   Type: {dms_mig.type}")
+
+        try:
+            response = dms.start_migration(migration_id=dms_mig.id)
+            work_request_id = response.headers.get("opc-work-request-id", "unknown")
+            print(f"   ✅ Migration job started (work request: {work_request_id})")
+            results.append({
+                "key": mig_key, "name": display_name,
+                "status": "started", "work_request": work_request_id,
+            })
+
+            if args.wait:
+                print(f"   Waiting for job to complete (this may take a long time)...")
+                import time
+                for i in range(360):  # up to 1 hour
+                    try:
+                        wr = dms.get_work_request(work_request_id).data
+                        pct = wr.percent_complete or 0
+                        print(f"\r   Progress: {pct:.0f}% ({wr.status})", end="", flush=True)
+                        if wr.status in ("SUCCEEDED", "FAILED", "CANCELED"):
+                            print()
+                            results[-1]["final_status"] = wr.status
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(10)
+
+        except oci.exceptions.ServiceError as e:
+            print(f"   ❌ Failed: {e.message}")
+            results.append({
+                "key": mig_key, "name": display_name,
+                "status": "failed", "error": e.message,
+            })
+
+    if args.output == "json":
+        print(json.dumps(results, indent=2))
+
+    if not results:
+        print("No migrations found to start.")
+    else:
+        started = sum(1 for r in results if r["status"] == "started")
+        print(f"\nStarted {started}/{len(target_keys)} migration(s)")
+        print("Monitor progress: python3 migrate.py status --json")
+
+
+def cmd_cleanup(args):
+    """Delete DMS connections or migrations by display name."""
+    config = MigrationConfig(args.config)
+    if not config.load():
+        print("❌ Configuration errors:")
+        for e in config.errors:
+            print(f"  • {e}")
+        sys.exit(1)
+
+    try:
+        from core.oci_client import OCIClientFactory
+        oci_factory = OCIClientFactory(
+            config_profile=config.oci.get("config_profile", "DEFAULT"),
+            region=config.oci.get("region"),
+        )
+    except Exception as e:
+        print(f"❌ OCI SDK required: {e}")
+        sys.exit(1)
+
+    import oci
+    import time
+
+    dms = oci_factory.dms
+    compartment = config.oci["compartment_ocid"]
+    resource_type = args.type  # "connection" or "migration"
+    names = args.name  # list of display names
+
+    if resource_type == "connection":
+        items = dms.list_connections(compartment_id=compartment).data.items
+    else:
+        items = dms.list_migrations(compartment_id=compartment).data.items
+
+    active = {i.display_name: i.id for i in items
+              if i.lifecycle_state in ("ACTIVE", "CREATING")}
+
+    deleted = []
+    for name in names:
+        if name not in active:
+            print(f"⚠️  {resource_type} '{name}' not found (or not ACTIVE)")
+            continue
+
+        rid = active[name]
+        print(f"🗑  Deleting {resource_type}: {name} ({rid})...")
+        try:
+            if resource_type == "connection":
+                dms.delete_connection(rid)
+            else:
+                dms.delete_migration(rid)
+
+            # Wait for deletion
+            for _ in range(30):
+                try:
+                    if resource_type == "connection":
+                        r = dms.get_connection(rid).data
+                    else:
+                        r = dms.get_migration(rid).data
+                    if r.lifecycle_state in ("DELETED", "FAILED"):
+                        break
+                except oci.exceptions.ServiceError as se:
+                    if se.status == 404:
+                        break
+                    raise
+                time.sleep(10)
+
+            print(f"   ✅ Deleted: {name}")
+            deleted.append(name)
+        except Exception as e:
+            print(f"   ❌ Failed: {e}")
+
+    print(f"\nDeleted {len(deleted)}/{len(names)} {resource_type}(s)")
+
+
 def cmd_diagnose(args):
     """Look up error in KB."""
     kb = KnowledgeBase()
@@ -463,6 +628,18 @@ def main():
     diag_parser = subparsers.add_parser("diagnose", help="Look up error in KB")
     diag_parser.add_argument("error_text", nargs="+", help="Error text to look up")
 
+    # -- start-migration --
+    start_parser = subparsers.add_parser("start-migration", help="Start (run) DMS migration jobs")
+    start_parser.add_argument("--migration", help="Specific migration key (default: all)")
+    start_parser.add_argument("--wait", action="store_true", help="Wait for job completion")
+    start_parser.add_argument("--output", choices=["terminal", "json"], help="Output format")
+
+    # -- cleanup --
+    cleanup_parser = subparsers.add_parser("cleanup", help="Delete DMS connections or migrations by name")
+    cleanup_parser.add_argument("type", choices=["connection", "migration"],
+                                help="Resource type to delete")
+    cleanup_parser.add_argument("name", nargs="+", help="Display name(s) of resource(s) to delete")
+
     # -- deploy --
     deploy_parser = subparsers.add_parser("deploy", help="Run migration pipeline")
     deploy_parser.add_argument("--step", type=int, help="Run specific step number")
@@ -509,6 +686,10 @@ def main():
         cmd_validate_config(args)
     elif args.command == "assess":
         cmd_assess(args)
+    elif args.command == "start-migration":
+        cmd_start_migration(args)
+    elif args.command == "cleanup":
+        cmd_cleanup(args)
     elif args.command == "deploy":
         cmd_deploy(args)
     elif args.command == "status":

@@ -33,6 +33,25 @@ def _create_oracle_connection_details(oci_models, **kwargs):
     return oci_models.CreateConnectionDetails(**old_kwargs)
 
 
+def _delete_and_wait(dms_client, conn_id, conn_name, max_wait=300, interval=10):
+    """Delete a DMS connection and wait for it to be gone."""
+    import time
+    dms_client.delete_connection(conn_id)
+    elapsed = 0
+    while elapsed < max_wait:
+        try:
+            c = dms_client.get_connection(conn_id).data
+            if c.lifecycle_state in ("DELETED", "FAILED"):
+                return True
+        except Exception:
+            # 404 = deleted
+            return True
+        time.sleep(interval)
+        elapsed += interval
+    logger.error(f"  Timeout waiting for {conn_name} deletion")
+    return False
+
+
 class DMSConnectionsOperation(BaseOperation):
 
     @property
@@ -40,7 +59,7 @@ class DMSConnectionsOperation(BaseOperation):
         return "dms-connections"
 
     def check_exists(self, **kwargs) -> Optional[str]:
-        """Check if all required DMS connections exist."""
+        """Check if all required DMS connections exist and are properly configured."""
         try:
             compartment = self.config.oci["compartment_ocid"]
             connections = self.oci.dms.list_connections(
@@ -60,9 +79,19 @@ class DMSConnectionsOperation(BaseOperation):
             for key in source_containers:
                 expected_names.add(f"dms-src-{key}")
 
-            if expected_names.issubset(existing.keys()):
-                return "all-connections-exist"
-            return None
+            if not expected_names.issubset(existing.keys()):
+                return None
+
+            # All connections exist — check if any need replication_username update
+            for key, src in self.config.source_databases.items():
+                conn_name = f"dms-src-{key}"
+                if conn_name in existing and src.get("gg_username"):
+                    conn = self.oci.dms.get_connection(existing[conn_name]).data
+                    if getattr(conn, "replication_username", None) != src["gg_username"]:
+                        logger.info(f"  {conn_name} needs replication_username update")
+                        return None  # Force execute to run
+
+            return "all-connections-exist"
 
         except Exception as e:
             logger.debug(f"Cannot check connections: {e}")
@@ -105,8 +134,29 @@ class DMSConnectionsOperation(BaseOperation):
         for key, src in self.config.source_databases.items():
             conn_name = f"dms-src-{key}"
             if conn_name in existing_connections:
-                logger.info(f"  Source connection exists: {conn_name}")
-                continue
+                # Check if replication_username needs to be set
+                existing_id = existing_connections[conn_name]
+                try:
+                    existing_conn = self.oci.dms.get_connection(existing_id).data
+                    needs_recreate = (
+                        src.get("gg_username")
+                        and getattr(existing_conn, "replication_username", None) != src["gg_username"]
+                    )
+                    if needs_recreate:
+                        # DMS API silently ignores replication_username on update,
+                        # so we must delete and recreate the connection.
+                        logger.info(f"  {conn_name} needs replication_username — deleting to recreate...")
+                        if not _delete_and_wait(self.oci.dms, existing_id, conn_name):
+                            errors.append(f"{conn_name}: timeout deleting for recreate")
+                            continue
+                        del existing_connections[conn_name]
+                        # Fall through to creation below
+                    else:
+                        logger.info(f"  Source connection exists: {conn_name}")
+                        continue
+                except Exception as e:
+                    logger.warning(f"  Could not check {conn_name}: {e}")
+                    continue
 
             password_secret = secret_map.get(f"dms-src-{key}-password")
             if not password_secret:

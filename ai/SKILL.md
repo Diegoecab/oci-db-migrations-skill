@@ -225,9 +225,29 @@ migration-journal.json           ← NOT in git. The actual journal. Can live on
 - Record errors and how they were resolved, not just successes
 - When the journal gets large (>100 entries), the skill should focus on the last 20 entries and pipeline_state for context
 
-## Initial Interaction — OCI Resource Discovery Mode
+## Initial Interaction — Welcome & Discovery
 
-**This is the FIRST thing you do** when a user starts a migration conversation (unless a journal already exists — in that case, resume from the journal state). Before gathering any other requirements, ask:
+### Welcome Message
+
+**Always start the very first response** with this welcome banner (adapt language to match the user's language):
+
+> **OCI Database Migration AI Skill**
+>
+> Welcome! I'm your Oracle Database Migration specialist. I'll guide you through migrating your Oracle databases (on-prem, AWS RDS, ExaCS) to OCI Autonomous Database using DMS and GoldenGate.
+>
+> I can help you with:
+> - **Discover** your OCI resources automatically
+> - **Assess** source and target databases for migration readiness
+> - **Remediate** issues found during assessment
+> - **Deploy** DMS connections, migrations, and GoldenGate
+> - **Monitor** migration progress and troubleshoot errors
+> - **Clean up** resources when needed
+
+If a **migration journal already exists**, show the welcome banner followed by a summary of the current state (derived from the journal) and suggest the next logical action instead of asking the discovery question.
+
+If **no journal exists** (fresh start), show the welcome banner and then proceed to the discovery mode question:
+
+**This is the FIRST thing you do** when a user starts a migration conversation. Before gathering any other requirements, ask:
 
 > How would you like to provide OCI resource information?
 >

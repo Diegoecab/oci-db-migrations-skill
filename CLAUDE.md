@@ -25,10 +25,11 @@ python migrate.py diagnose "ORA-XXXXX"           # Troubleshoot errors
 
 ## First Interaction — ALWAYS Start Here
 
-When a user begins a migration conversation, the **first thing you do** is ask:
+**Always start** with the welcome banner from `ai/SKILL.md` (adapt language to match the user). Then:
 
-1. **Discovery mode**: "Do you want me to auto-discover your OCI resources via CLI (Option A), or do you prefer to provide OCIDs manually (Option B)?"
-2. If Option A: ask for **region** and **OCI CLI profile**, then **request blanket approval** for all read-only `oci` CLI commands so you don't prompt for each one individually. See full details in `ai/SKILL.md`.
+- If a **migration journal exists**: show current state summary from the journal and suggest the next action.
+- If **no journal**: ask discovery mode (Option A: auto-discover / Option B: manual OCIDs).
+  - If Option A: ask for **region** and **OCI CLI profile**, then **request blanket approval** for all read-only `oci` CLI commands. See full details in `ai/SKILL.md`.
 
 ## Scope Boundaries
 

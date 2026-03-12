@@ -1,0 +1,54 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(oci iam policy create*)",
+      "Bash(oci iam policy update*)",
+      "Bash(oci iam policy delete*)",
+      "Bash(oci iam dynamic-group create*)",
+      "Bash(oci iam dynamic-group update*)",
+      "Bash(oci iam dynamic-group delete*)",
+      "Bash(oci network * create*)",
+      "Bash(oci network * update*)",
+      "Bash(oci network * delete*)",
+      "Bash(oci kms vault create*)",
+      "Bash(oci kms vault delete*)",
+      "Bash(oci kms management key create*)",
+      "Bash(oci kms management key delete*)",
+      "Bash(oci vault secret create*)",
+      "Bash(oci vault secret delete*)",
+      "Bash(oci os bucket create*)",
+      "Bash(oci os bucket delete*)",
+      "Bash(oci db autonomous-database create*)",
+      "Bash(oci db autonomous-database delete*)",
+      "Bash(oci db autonomous-database terminate*)",
+      "Bash(oci db db-system terminate*)",
+      "Bash(rm -rf /*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '[SESSION_START] OCI Database Migration AI Skill is active. Show the welcome banner from ai/SKILL.md on the user first message. If a migration journal exists, include current pipeline state summary and suggest next action.'",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/scope-guard.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
