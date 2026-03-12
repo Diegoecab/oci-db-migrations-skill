@@ -1,0 +1,12 @@
+# Requires Python >= 3.8
+
+# Core
+oci>=2.120.0           # OCI Python SDK
+oracledb>=2.0.0        # Oracle DB connector (thin + thick mode)
+pyyaml>=6.0            # KB file parsing
+
+# Enhanced terminal UI
+rich>=13.0             # Assessment reports, status output
+
+# Note: If running on Python 3.6/3.7 (e.g. system Python),
+# remove oracledb and rich — the tool falls back to sqlplus automatically.

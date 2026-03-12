@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environment
+venv/
+.venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# OCI
+.oci/
+*.pem
+
+# Project - sensitive files
+migration-config.json
+remediation.sql
+remediation-oci.sh
+
+# Generated
+migrate
+gg-config/
+*.tfplan
+*.tfstate
+*.tfstate.backup
+
+# Logs
+*.log

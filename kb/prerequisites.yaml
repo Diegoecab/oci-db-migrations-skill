@@ -1,0 +1,437 @@
+# =============================================================================
+# OCI DMS Migration Prerequisites Knowledge Base
+# =============================================================================
+# Severity: blocker | warning | info
+# check_type: sql | sql_set | sql_per_table | sql_per_schema | oci_sdk | custom
+# Variants: oracle_onprem | oracle_rds | oracle_exacs | oracle_exacc
+# =============================================================================
+
+source_database:
+
+  # --- Database Configuration ---
+  - id: DB_VERSION
+    category: database_config
+    description: "Oracle version compatibility with DMS"
+    check_type: sql
+    sql: "SELECT VERSION_FULL FROM V$INSTANCE"
+    fallback_sql: "SELECT VERSION FROM V$INSTANCE"
+    expected: "regex:^(11\\.2|12\\.[12]|18\\.|19\\.|21\\.|23\\.)"
+    severity: blocker
+    remediation: "DMS supports Oracle 11gR2 through 23ai. Upgrade if outside range."
+    doc_url: "https://docs.oracle.com/en-us/iaas/database-migration/doc/prerequisites-oracle-migrations.html"
+
+  - id: ARCHIVELOG_MODE
+    category: database_config
+    description: "Archive log mode (required for ONLINE)"
+    check_type: sql
+    sql: "SELECT LOG_MODE FROM V$DATABASE"
+    expected: "ARCHIVELOG"
+    severity: blocker
+    applies_to: ONLINE
+    remediation: |
+      SHUTDOWN IMMEDIATE;
+      STARTUP MOUNT;
+      ALTER DATABASE ARCHIVELOG;
+      ALTER DATABASE OPEN;
+    variants:
+      oracle_rds: { severity: info, notes: "Always enabled on RDS" }
+      oracle_exacs: { notes: "Use dbaascli if not enabled" }
+
+  - id: FORCE_LOGGING
+    category: database_config
+    description: "Force logging ensures all changes are captured for CDC"
+    check_type: sql
+    sql: "SELECT FORCE_LOGGING FROM V$DATABASE"
+    expected: "YES"
+    severity: blocker
+    applies_to: ONLINE
+    remediation: "ALTER DATABASE FORCE LOGGING;"
+    variants:
+      oracle_rds:
+        remediation: "EXEC rdsadmin.rdsadmin_util.force_logging(p_enable => true);"
+
+  - id: SUPPLEMENTAL_LOG_MIN
+    category: supplemental_logging
+    description: "Minimum supplemental logging"
+    check_type: sql
+    sql: "SELECT SUPPLEMENTAL_LOG_DATA_MIN FROM V$DATABASE"
+    expected: "YES"
+    severity: blocker
+    applies_to: ONLINE
+    remediation: "ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;"
+    variants:
+      oracle_rds:
+        remediation: "EXEC rdsadmin.rdsadmin_util.alter_supplemental_logging(p_action => 'ADD');"
+
+  - id: SUPPLEMENTAL_LOG_PK
+    category: supplemental_logging
+    description: "Primary key supplemental logging"
+    check_type: sql
+    sql: "SELECT SUPPLEMENTAL_LOG_DATA_PK FROM V$DATABASE"
+    expected: "YES"
+    severity: warning
+    applies_to: ONLINE
+    remediation: "ALTER DATABASE ADD SUPPLEMENTAL LOG DATA (PRIMARY KEY) COLUMNS;"
+
+  - id: SUPPLEMENTAL_LOG_ALL_COLUMNS
+    category: supplemental_logging
+    description: "ALL COLUMNS logging on tables in migration scope"
+    check_type: sql_per_table
+    sql: |
+      SELECT OWNER, TABLE_NAME,
+        CASE WHEN EXISTS (
+          SELECT 1 FROM DBA_LOG_GROUPS g
+          WHERE g.OWNER = t.OWNER AND g.TABLE_NAME = t.TABLE_NAME
+          AND g.LOG_GROUP_TYPE = 'ALL COLUMN LOGGING'
+        ) THEN 'YES' ELSE 'NO' END AS HAS_ALL_LOG
+      FROM DBA_TABLES t
+      WHERE (OWNER, TABLE_NAME) IN ({scope_tables})
+    expected: "all YES"
+    severity: blocker
+    applies_to: ONLINE
+    remediation_template: "ALTER TABLE {owner}.{table} ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;"
+
+  - id: ENABLE_GG_REPLICATION
+    category: database_config
+    description: "GoldenGate replication parameter"
+    check_type: sql
+    sql: "SELECT VALUE FROM V$PARAMETER WHERE NAME = 'enable_goldengate_replication'"
+    expected: "TRUE"
+    severity: blocker
+    applies_to: ONLINE
+    remediation: "ALTER SYSTEM SET enable_goldengate_replication = TRUE SCOPE=BOTH;"
+    variants:
+      oracle_rds: { severity: info, notes: "Managed automatically on RDS" }
+
+  - id: STREAMS_POOL_SIZE
+    category: database_config
+    description: "Streams pool for GoldenGate (min 256MB recommended)"
+    check_type: sql
+    sql: "SELECT VALUE FROM V$PARAMETER WHERE NAME = 'streams_pool_size'"
+    expected: "gte:268435456"
+    severity: warning
+    remediation: "ALTER SYSTEM SET streams_pool_size = 512M SCOPE=BOTH;"
+
+  # --- CDB / PDB ---
+  - id: CDB_STATUS
+    category: cdb_pdb
+    description: "Detect CDB/PDB architecture"
+    check_type: sql
+    sql: "SELECT CDB FROM V$DATABASE"
+    expected: "informational"
+    severity: info
+
+  - id: PDB_OPEN_MODE
+    category: cdb_pdb
+    description: "Target PDB must be READ WRITE"
+    check_type: sql
+    sql: "SELECT OPEN_MODE FROM V$PDBS WHERE NAME = UPPER('{pdb_name}')"
+    expected: "READ WRITE"
+    severity: blocker
+    condition: "is_cdb == true"
+    remediation: "ALTER PLUGGABLE DATABASE {pdb_name} OPEN;"
+
+  # --- Users and Privileges ---
+  - id: GGADMIN_EXISTS
+    category: users_privileges
+    description: "GoldenGate admin user exists"
+    check_type: sql
+    sql: "SELECT USERNAME, ACCOUNT_STATUS FROM DBA_USERS WHERE USERNAME = UPPER('{gg_username}')"
+    expected: "row_exists AND ACCOUNT_STATUS = 'OPEN'"
+    severity: blocker
+    remediation: |
+      CREATE USER {gg_username} IDENTIFIED BY "{gg_password}"
+        DEFAULT TABLESPACE USERS TEMPORARY TABLESPACE TEMP
+        QUOTA UNLIMITED ON USERS;
+
+  - id: GGADMIN_UNLOCKED
+    category: users_privileges
+    description: "GoldenGate admin account not locked"
+    check_type: sql
+    sql: "SELECT ACCOUNT_STATUS FROM DBA_USERS WHERE USERNAME = UPPER('{gg_username}')"
+    expected: "OPEN"
+    severity: blocker
+    remediation: "ALTER USER {gg_username} ACCOUNT UNLOCK;"
+    depends_on: [GGADMIN_EXISTS]
+
+  - id: GGADMIN_PRIVILEGES
+    category: users_privileges
+    description: "GoldenGate admin has all required privileges"
+    check_type: sql_set
+    sql: |
+      SELECT PRIVILEGE FROM DBA_SYS_PRIVS WHERE GRANTEE = UPPER('{gg_username}')
+      UNION ALL
+      SELECT GRANTED_ROLE FROM DBA_ROLE_PRIVS WHERE GRANTEE = UPPER('{gg_username}')
+    expected_set:
+      - CREATE SESSION
+      - ALTER SESSION
+      - SELECT ANY DICTIONARY
+      - SELECT ANY TABLE
+      - INSERT ANY TABLE
+      - UPDATE ANY TABLE
+      - DELETE ANY TABLE
+      - CREATE ANY TABLE
+      - ALTER ANY TABLE
+      - DROP ANY TABLE
+      - LOCK ANY TABLE
+      - CREATE ANY SEQUENCE
+      - ALTER ANY SEQUENCE
+      - DROP ANY SEQUENCE
+      - CREATE ANY INDEX
+      - ALTER ANY INDEX
+      - DROP ANY INDEX
+      - CREATE ANY PROCEDURE
+      - EXECUTE ANY PROCEDURE
+      - CREATE ANY TYPE
+      - FLASHBACK ANY TABLE
+      - CREATE ANY DIRECTORY
+      - RESOURCE
+      - CONNECT
+    severity: blocker
+    remediation_template: "GRANT {missing_priv} TO {gg_username};"
+    depends_on: [GGADMIN_EXISTS]
+    doc_url: "https://docs.oracle.com/en-us/iaas/database-migration/doc/preparing-oracle-source-database.html"
+
+  - id: GGADMIN_GG_AUTH
+    category: users_privileges
+    description: "GoldenGate admin authorized for CAPTURE"
+    check_type: sql
+    sql: |
+      SELECT USERNAME, PRIVILEGE_TYPE FROM DBA_GOLDENGATE_PRIVILEGES
+      WHERE USERNAME = UPPER('{gg_username}')
+    expected: "CAPTURE or * in PRIVILEGE_TYPE"
+    severity: blocker
+    applies_to: ONLINE
+    remediation: |
+      EXEC DBMS_GOLDENGATE_AUTH.GRANT_ADMIN_PRIVILEGE(
+        grantee => '{gg_username}', privilege_type => 'CAPTURE',
+        grant_select_privileges => TRUE, do_grants => TRUE);
+    variants:
+      oracle_rds:
+        remediation: |
+          EXEC rdsadmin.rdsadmin_dbms_goldengate_auth.grant_admin_privilege(
+            grantee => '{gg_username}', privilege_type => 'CAPTURE',
+            grant_select_privileges => TRUE);
+    depends_on: [GGADMIN_EXISTS, GGADMIN_PRIVILEGES]
+
+  - id: DMS_USER_EXISTS
+    category: users_privileges
+    description: "DMS migration user exists with Data Pump privileges"
+    check_type: sql
+    sql: "SELECT USERNAME, ACCOUNT_STATUS FROM DBA_USERS WHERE USERNAME = UPPER('{username}')"
+    expected: "row_exists AND ACCOUNT_STATUS = 'OPEN'"
+    severity: blocker
+    remediation: |
+      CREATE USER {username} IDENTIFIED BY "{password}"
+        DEFAULT TABLESPACE USERS TEMPORARY TABLESPACE TEMP QUOTA UNLIMITED ON USERS;
+      GRANT CONNECT, RESOURCE, DATAPUMP_EXP_FULL_DATABASE, DATAPUMP_IMP_FULL_DATABASE TO {username};
+
+  # --- Data Pump ---
+  - id: DATAPUMP_DIR
+    category: datapump
+    description: "Data Pump directory exists"
+    check_type: sql
+    sql: "SELECT DIRECTORY_NAME, DIRECTORY_PATH FROM DBA_DIRECTORIES WHERE DIRECTORY_NAME = 'DATA_PUMP_DIR'"
+    expected: "row_exists"
+    severity: blocker
+    remediation: |
+      CREATE OR REPLACE DIRECTORY DATA_PUMP_DIR AS '/u01/app/oracle/datapump';
+      GRANT READ, WRITE ON DIRECTORY DATA_PUMP_DIR TO {username};
+      GRANT READ, WRITE ON DIRECTORY DATA_PUMP_DIR TO {gg_username};
+    variants:
+      oracle_rds: { severity: info, notes: "Pre-configured on RDS" }
+
+  - id: DATAPUMP_DIR_GRANTS
+    category: datapump
+    description: "Migration users have READ/WRITE on Data Pump directory"
+    check_type: sql
+    sql: |
+      SELECT GRANTEE, PRIVILEGE FROM DBA_TAB_PRIVS
+      WHERE TABLE_NAME = 'DATA_PUMP_DIR'
+      AND GRANTEE IN (UPPER('{username}'), UPPER('{gg_username}'))
+    expected: "READ and WRITE for both users"
+    severity: blocker
+    remediation_template: "GRANT READ, WRITE ON DIRECTORY DATA_PUMP_DIR TO {missing_user};"
+    depends_on: [DATAPUMP_DIR]
+
+  # --- Schema Analysis ---
+  - id: SCHEMA_EXISTS
+    category: schema_analysis
+    description: "Schemas in scope exist"
+    check_type: sql_per_schema
+    sql: "SELECT USERNAME FROM DBA_USERS WHERE USERNAME = UPPER('{schema}')"
+    expected: "row_exists"
+    severity: blocker
+
+  - id: SCHEMA_SIZE
+    category: schema_analysis
+    description: "Schema sizes (for planning)"
+    check_type: sql_per_schema
+    sql: |
+      SELECT OWNER, ROUND(SUM(BYTES)/1024/1024/1024,2) AS SIZE_GB
+      FROM DBA_SEGMENTS WHERE OWNER = UPPER('{schema}') GROUP BY OWNER
+    expected: "informational"
+    severity: info
+
+  - id: SCHEMA_OBJECTS
+    category: schema_analysis
+    description: "Object types and counts"
+    check_type: sql_per_schema
+    sql: |
+      SELECT OWNER, OBJECT_TYPE, COUNT(*) CNT FROM DBA_OBJECTS
+      WHERE OWNER = UPPER('{schema}')
+      AND OBJECT_TYPE NOT IN ('INDEX','LOB','INDEX PARTITION','LOB PARTITION')
+      GROUP BY OWNER, OBJECT_TYPE ORDER BY CNT DESC
+    expected: "informational"
+    severity: info
+
+  - id: UNSUPPORTED_DATATYPES
+    category: schema_analysis
+    description: "Datatypes with DMS/GoldenGate limitations"
+    check_type: sql_per_schema
+    sql: |
+      SELECT OWNER, TABLE_NAME, COLUMN_NAME, DATA_TYPE FROM DBA_TAB_COLUMNS
+      WHERE OWNER = UPPER('{schema}')
+      AND DATA_TYPE IN ('LONG','LONG RAW','XMLTYPE','SDO_GEOMETRY','BFILE','ANYDATA')
+    expected: "empty_result"
+    severity: warning
+    notes: "LONG→convert to LOB. XMLTYPE→DP ok, GG CDC limited. SDO→special GG config."
+
+
+# =============================================================================
+# TARGET ADB CHECKS
+# =============================================================================
+target_adb:
+
+  - id: ADB_AVAILABLE
+    category: adb_status
+    description: "ADB in AVAILABLE state"
+    check_type: oci_sdk
+    sdk_call: "database_client.get_autonomous_database"
+    field: "lifecycle_state"
+    expected: "AVAILABLE"
+    severity: blocker
+    remediation: "oci db autonomous-database start --autonomous-database-id {adb_ocid}"
+
+  - id: ADB_PRIVATE_ENDPOINT
+    category: adb_networking
+    description: "ADB uses private endpoint"
+    check_type: oci_sdk
+    sdk_call: "database_client.get_autonomous_database"
+    field: "private_endpoint"
+    expected: "not_null"
+    severity: warning
+    remediation: "Private endpoint is set at creation. If public, DMS needs public connectivity (not recommended)."
+
+  - id: ADB_GGADMIN_UNLOCKED
+    category: adb_users
+    description: "GGADMIN unlocked on target ADB"
+    check_type: sql
+    connection: target
+    sql: "SELECT USERNAME, ACCOUNT_STATUS FROM DBA_USERS WHERE USERNAME = 'GGADMIN'"
+    expected: "ACCOUNT_STATUS = 'OPEN'"
+    severity: blocker
+    remediation: 'ALTER USER GGADMIN IDENTIFIED BY "{gg_password}" ACCOUNT UNLOCK;'
+
+  - id: ADB_OBJ_STORAGE_CREDENTIAL
+    category: adb_object_storage
+    description: "Object Storage credential exists in ADB"
+    check_type: sql
+    connection: target
+    sql: |
+      SELECT CREDENTIAL_NAME, ENABLED FROM DBA_CREDENTIALS
+      WHERE CREDENTIAL_NAME = 'OCI$RESOURCE_PRINCIPAL' OR CREDENTIAL_NAME LIKE 'DMS_%'
+    expected: "row_exists AND ENABLED = 'TRUE'"
+    severity: blocker
+    remediation: |
+      -- Resource Principal (preferred):
+      -- IAM policy: Allow any-user to manage objects in compartment X
+      --   where ALL {request.principal.type='autonomous-database', request.principal.id='{adb_ocid}'}
+      -- Auth Token fallback:
+      BEGIN DBMS_CLOUD.CREATE_CREDENTIAL('DMS_OBJ_STORE_CRED','{oci_user}','{auth_token}'); END;
+
+  - id: ADB_WALLET
+    category: adb_connectivity
+    description: "ADB wallet downloadable"
+    check_type: oci_sdk
+    sdk_call: "database_client.generate_autonomous_database_wallet"
+    expected: "wallet_bytes > 0"
+    severity: blocker
+    remediation: "Check ADB AVAILABLE, IAM 'read autonomous-database-family', ADMIN password set."
+
+
+# =============================================================================
+# OCI INFRASTRUCTURE CHECKS
+# =============================================================================
+oci_infrastructure:
+
+  - id: OCI_BUCKET_EXISTS
+    category: object_storage
+    description: "Data Pump staging bucket exists"
+    check_type: oci_sdk
+    sdk_call: "object_storage_client.get_bucket"
+    expected: "bucket_exists"
+    severity: blocker
+    remediation: |
+      oci os bucket create --compartment-id {compartment_ocid} --name {bucket_name} --storage-tier Standard
+
+  - id: OCI_VAULT_ACTIVE
+    category: vault
+    description: "OCI Vault in ACTIVE state"
+    check_type: oci_sdk
+    sdk_call: "kms_vault_client.get_vault"
+    field: "lifecycle_state"
+    expected: "ACTIVE"
+    severity: blocker
+
+  - id: OCI_KEY_ENABLED
+    category: vault
+    description: "Master encryption key ENABLED"
+    check_type: oci_sdk
+    sdk_call: "kms_management_client.get_key"
+    field: "lifecycle_state"
+    expected: "ENABLED"
+    severity: blocker
+    remediation: "oci kms management key enable --key-id {key_ocid} --endpoint {vault_mgmt_endpoint}"
+
+  - id: OCI_DMS_POLICY
+    category: iam
+    description: "IAM policy for DMS exists"
+    check_type: oci_sdk
+    sdk_call: "identity_client.list_policies"
+    expected: "policy matching 'odms-family' or 'odms-connection'"
+    severity: blocker
+    remediation: "Allow group {group} to manage odms-family in compartment {compartment}"
+
+  - id: OCI_GG_POLICY
+    category: iam
+    description: "IAM policy for GoldenGate exists"
+    check_type: oci_sdk
+    sdk_call: "identity_client.list_policies"
+    expected: "policy matching 'goldengate-family'"
+    severity: blocker
+    condition: "any migration has enable_reverse_replication"
+    remediation: "Allow group {group} to manage goldengate-family in compartment {compartment}"
+
+  - id: OCI_GG_DYNAMIC_GROUP
+    category: iam
+    description: "Dynamic group for GG deployments (vault access)"
+    check_type: oci_sdk
+    sdk_call: "identity_client.list_dynamic_groups"
+    expected: "matching goldengatedeployment resource type"
+    severity: blocker
+    condition: "any migration has enable_reverse_replication"
+    remediation: |
+      Dynamic Group: ALL {resource.type='goldengatedeployment', resource.compartment.id='{compartment_ocid}'}
+      Policy: Allow dynamic-group GGDeployments to read secret-bundles in compartment {compartment}
+
+  - id: OCI_SOURCE_REACHABLE
+    category: networking
+    description: "TCP connectivity to source database"
+    check_type: custom
+    custom_check: "tcp_connect_test"
+    expected: "connection_successful"
+    severity: blocker
+    remediation: |
+      Check: VPN/FastConnect, source firewall, OCI route tables, NSG/SecList egress rules.
+      If AWS RDS: Security Group must allow OCI subnet CIDR on port {source_port}.

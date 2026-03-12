@@ -1,0 +1,263 @@
+"""
+Operation 03: Create DMS connections for source and target databases.
+
+Creates:
+  - Source connection (Oracle DB with private endpoint)
+  - Target connection (ADB with private endpoint)
+
+Uses OCI Vault secrets for credentials (created in step 01).
+
+Compatible with both old and new OCI SDK versions:
+  - New SDK (>=2.120): CreateOracleConnectionDetails with technology_type, connection_string
+  - Old SDK: CreateConnectionDetails with database_type + manual_database_sub_type
+"""
+
+import logging
+from typing import Optional
+
+from operations.base import BaseOperation, OpResult, OpStatus
+
+logger = logging.getLogger(__name__)
+
+
+def _create_oracle_connection_details(oci_models, **kwargs):
+    """Create Oracle connection details compatible with both SDK versions."""
+    # Try new-style subclass first (SDK >= 2.100+)
+    if hasattr(oci_models, 'CreateOracleConnectionDetails'):
+        return oci_models.CreateOracleConnectionDetails(**kwargs)
+
+    # Fallback to old-style base class
+    old_kwargs = dict(kwargs)
+    old_kwargs.pop('technology_type', None)
+    old_kwargs['database_type'] = 'ORACLE'
+    return oci_models.CreateConnectionDetails(**old_kwargs)
+
+
+class DMSConnectionsOperation(BaseOperation):
+
+    @property
+    def name(self) -> str:
+        return "dms-connections"
+
+    def check_exists(self, **kwargs) -> Optional[str]:
+        """Check if all required DMS connections exist."""
+        try:
+            compartment = self.config.oci["compartment_ocid"]
+            connections = self.oci.dms.list_connections(
+                compartment_id=compartment,
+            ).data.items
+
+            existing = {c.display_name: c.id for c in connections
+                        if c.lifecycle_state in ("ACTIVE", "CREATING")}
+
+            expected_names = set()
+            for key in self.config.source_databases:
+                expected_names.add(f"dms-src-{key}")
+            for key in self.config.target_databases:
+                expected_names.add(f"dms-tgt-{key}")
+            # Include CDB container connections
+            source_containers = getattr(self.config, '_raw', {}).get("source_container_databases", {})
+            for key in source_containers:
+                expected_names.add(f"dms-src-{key}")
+
+            if expected_names.issubset(existing.keys()):
+                return "all-connections-exist"
+            return None
+
+        except Exception as e:
+            logger.debug(f"Cannot check connections: {e}")
+            return None
+
+    def execute(self, **kwargs) -> OpResult:
+        """Create missing DMS connections."""
+        import oci
+
+        compartment = self.config.oci["compartment_ocid"]
+        subnet_ocid = self.config.networking["subnet_ocid"]
+        vault_ocid = self.config.vault["vault_ocid"]
+        key_ocid = self.config.vault["key_ocid"]
+
+        # Get existing connections
+        existing_connections = {}
+        try:
+            connections = self.oci.dms.list_connections(
+                compartment_id=compartment).data.items
+            existing_connections = {
+                c.display_name: c.id for c in connections
+                if c.lifecycle_state in ("ACTIVE", "CREATING")
+            }
+        except Exception:
+            pass
+
+        # Resolve secret OCIDs
+        secrets_client = oci.vault.VaultsClient(self.oci.config)
+        secrets_list = secrets_client.list_secrets(
+            compartment_id=compartment,
+            vault_id=vault_ocid,
+            lifecycle_state="ACTIVE",
+        ).data
+        secret_map = {s.secret_name: s.id for s in secrets_list}
+
+        created = []
+        errors = []
+
+        # Source connections
+        for key, src in self.config.source_databases.items():
+            conn_name = f"dms-src-{key}"
+            if conn_name in existing_connections:
+                logger.info(f"  Source connection exists: {conn_name}")
+                continue
+
+            password_secret = secret_map.get(f"dms-src-{key}-password")
+            if not password_secret:
+                errors.append(f"{conn_name}: password secret not found in vault")
+                continue
+
+            try:
+                nsg_ocid = self.config.networking.get("nsg_ocid")
+                nsg_ids = [nsg_ocid] if nsg_ocid else []
+
+                conn_kwargs = dict(
+                    compartment_id=compartment,
+                    display_name=conn_name,
+                    technology_type="ORACLE_DATABASE",
+                    connection_string=(
+                        f"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)"
+                        f"(HOST={src['hostname']})(PORT={src['port']}))"
+                        f"(CONNECT_DATA=(SERVICE_NAME={src['service_name']})))"
+                    ),
+                    username=src["username"],
+                    password=src["password"],
+                    vault_id=vault_ocid,
+                    key_id=key_ocid,
+                    subnet_id=subnet_ocid,
+                    nsg_ids=nsg_ids,
+                )
+
+                # Add replication credentials for ONLINE migrations (GoldenGate CDC)
+                if src.get("gg_username"):
+                    conn_kwargs["replication_username"] = src["gg_username"]
+                    conn_kwargs["replication_password"] = src["gg_password"]
+
+                details = _create_oracle_connection_details(
+                    oci.database_migration.models, **conn_kwargs)
+
+                response = self.oci.dms.create_connection(details)
+                conn_id = response.data.id
+                created.append(conn_name)
+                logger.info(f"  Created source connection: {conn_name} ({conn_id})")
+
+                # Wait for ACTIVE
+                self.wait_for_state(
+                    self.oci.dms.get_connection, conn_id, "ACTIVE",
+                    max_wait=600, interval=15
+                )
+
+            except Exception as e:
+                errors.append(f"{conn_name}: {e}")
+                logger.error(f"  Failed source connection {conn_name}: {e}")
+
+        # Source container (CDB) connections — for multitenant
+        source_containers = getattr(self.config, '_raw', {}).get("source_container_databases", {})
+        for key, cdb in source_containers.items():
+            conn_name = f"dms-src-{key}"
+            if conn_name in existing_connections:
+                logger.info(f"  CDB connection exists: {conn_name}")
+                continue
+
+            try:
+                nsg_ocid = self.config.networking.get("nsg_ocid")
+                nsg_ids = [nsg_ocid] if nsg_ocid else []
+
+                details = _create_oracle_connection_details(
+                    oci.database_migration.models,
+                    compartment_id=compartment,
+                    display_name=conn_name,
+                    technology_type="ORACLE_DATABASE",
+                    connection_string=(
+                        f"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)"
+                        f"(HOST={cdb['hostname']})(PORT={cdb['port']}))"
+                        f"(CONNECT_DATA=(SERVICE_NAME={cdb['service_name']})))"
+                    ),
+                    username=cdb["username"],
+                    password=cdb["password"],
+                    vault_id=vault_ocid,
+                    key_id=key_ocid,
+                    subnet_id=subnet_ocid,
+                    nsg_ids=nsg_ids,
+                )
+
+                response = self.oci.dms.create_connection(details)
+                conn_id = response.data.id
+                created.append(conn_name)
+                logger.info(f"  Created CDB connection: {conn_name} ({conn_id})")
+
+                self.wait_for_state(
+                    self.oci.dms.get_connection, conn_id, "ACTIVE",
+                    max_wait=600, interval=15
+                )
+
+            except Exception as e:
+                errors.append(f"{conn_name}: {e}")
+                logger.error(f"  Failed CDB connection {conn_name}: {e}")
+
+        # Target connections (ADB)
+        for key, tgt in self.config.target_databases.items():
+            conn_name = f"dms-tgt-{key}"
+            if conn_name in existing_connections:
+                logger.info(f"  Target connection exists: {conn_name}")
+                continue
+
+            try:
+                nsg_ocid = self.config.networking.get("nsg_ocid")
+                nsg_ids = [nsg_ocid] if nsg_ocid else []
+
+                conn_kwargs = dict(
+                    compartment_id=compartment,
+                    display_name=conn_name,
+                    technology_type="OCI_AUTONOMOUS_DATABASE",
+                    database_id=tgt["adb_ocid"],
+                    username=tgt["username"],
+                    password=tgt["password"],
+                    vault_id=vault_ocid,
+                    key_id=key_ocid,
+                    subnet_id=subnet_ocid,
+                    nsg_ids=nsg_ids,
+                )
+
+                # Add replication credentials for ONLINE migrations (GoldenGate CDC)
+                if tgt.get("gg_username"):
+                    conn_kwargs["replication_username"] = tgt["gg_username"]
+                    conn_kwargs["replication_password"] = tgt["gg_password"]
+
+                details = _create_oracle_connection_details(
+                    oci.database_migration.models, **conn_kwargs)
+
+                response = self.oci.dms.create_connection(details)
+                conn_id = response.data.id
+                created.append(conn_name)
+                logger.info(f"  Created target connection: {conn_name} ({conn_id})")
+
+                self.wait_for_state(
+                    self.oci.dms.get_connection, conn_id, "ACTIVE",
+                    max_wait=600, interval=15
+                )
+
+            except Exception as e:
+                errors.append(f"{conn_name}: {e}")
+                logger.error(f"  Failed target connection {conn_name}: {e}")
+
+        if errors:
+            return OpResult(
+                operation=self.name, resource_type="dms_connection",
+                status=OpStatus.FAILED,
+                error="; ".join(errors),
+                details={"created": created, "errors": errors},
+            )
+
+        return OpResult(
+            operation=self.name, resource_type="dms_connection",
+            status=OpStatus.CREATED if created else OpStatus.SKIPPED,
+            message=f"Created {len(created)} connections",
+            details={"created": created},
+        )

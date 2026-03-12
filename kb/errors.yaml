@@ -1,0 +1,93 @@
+# =============================================================================
+# Known Errors Catalog — DMS, GoldenGate, ORA, OCI
+# =============================================================================
+
+dms_errors:
+  - pattern: "409-Conflict"
+    description: "Resource already exists — state mismatch"
+    fix: "List existing resources with oci database-migration ... list, then use existing OCID or delete/recreate."
+    severity: recoverable
+
+  - pattern: "FQDN cannot be IP"
+    description: "DMS requires hostname, not IP for cross-network sources"
+    fix: "Set hostname to a valid FQDN. If no DNS, add /etc/hosts entry or OCI Private DNS A record."
+    severity: config_error
+
+  - pattern: "Invalid Fully qualified domain name.*not currently supported.*Please use IP"
+    description: "DMS cannot resolve internal FQDN — use IP address instead"
+    fix: "For OCI Base DB in the same VCN, DMS may not resolve internal FQDNs (e.g., h1.sb1.ec2vcn.oraclevcn.com). Use the private IP address of the database host directly in the connection_string. Get the IP from the DB System details in OCI Console or via: oci db node list --compartment-id <compartment> --db-system-id <dbsystem_ocid>"
+    severity: config_error
+
+  - pattern: "objectName must not be null"
+    description: "Invalid object filter format"
+    fix: "Use 'SCHEMA.*' for full schema or 'SCHEMA.TABLE' for specific table. Never bare schema name."
+    severity: config_error
+
+  - pattern: "objectType SCHEMA not valid"
+    description: "DMS does not accept SCHEMA as object type"
+    fix: "Use 'SCHEMA.*' which maps to type=ALL internally."
+    severity: config_error
+
+  - pattern: "LimitExceeded"
+    description: "OCI service limit for DMS resources"
+    fix: "Delete completed migrations or request limit increase via OCI Console > Governance > Limits."
+    severity: recoverable
+
+  - pattern: "Replication.*Disabled"
+    description: "Online replication not configured"
+    fix: "Ensure migration_type=ONLINE and goldengate section is configured. Recreate migration if needed."
+    severity: config_error
+
+  - pattern: "CPAT.*failed|compatibility.*check"
+    description: "CPAT compatibility check failed"
+    fix: "Check CPAT report in DMS Jobs. Common: LONG→LOB, unsupported index types, invalid objects."
+    severity: recoverable
+    doc_url: "https://docs.oracle.com/en-us/iaas/database-migration/doc/known-issues-oracle-migrations.html"
+
+oracle_errors:
+  - pattern: "ORA-39001|ORA-39002|ORA-39070"
+    description: "Data Pump directory or privilege error"
+    fix: "Verify DATA_PUMP_DIR exists, OS directory exists, GRANT READ,WRITE to migration user."
+    severity: recoverable
+
+  - pattern: "ORA-02291"
+    description: "FK constraint violation during import"
+    fix: "Use 'SCHEMA.*' for full schema (DMS auto-disables constraints). Or disable constraints pre-import."
+    severity: recoverable
+
+  - pattern: "ORA-01031"
+    description: "Insufficient privileges"
+    fix: "Run: python migrate.py --assess --source {key} to identify missing grants."
+    severity: recoverable
+
+  - pattern: "ORA-65040|ORA-65050"
+    description: "CDB/PDB privilege error — needs C## common user"
+    fix: "Connect to CDB$ROOT, CREATE USER C##DMS_ADMIN CONTAINER=ALL. Add source_container_databases entry."
+    severity: config_error
+
+  - pattern: "ORA-12154|ORA-12541|ORA-12543"
+    description: "TNS connectivity error"
+    fix: "Verify host:port:service_name. Check listener, firewall, network routing."
+    severity: recoverable
+
+goldengate_errors:
+  - pattern: "ABENDED"
+    description: "GG process crashed"
+    fix: "Check process report via GG REST API. Common: trail corruption, unsupported DDL, network disconnect."
+    severity: requires_investigation
+
+  - pattern: "Cannot connect"
+    description: "GG cannot reach database"
+    fix: "Verify DB reachable from GG subnet, check credential alias, verify listener, check NSG rules."
+    severity: recoverable
+
+oci_errors:
+  - pattern: "401-NotAuthenticated|HTTP.*Signature"
+    description: "OCI API auth failure"
+    fix: "Verify ~/.oci/oci_api_key.pem path (Linux path on WSL2), compare fingerprint, fix clock skew."
+    severity: config_error
+
+  - pattern: "timeout|hang"
+    description: "OCI CLI hangs"
+    fix: "Use SDK with explicit timeout. Avoid 'job-output list' (known hang). Use --cli-read-timeout 30."
+    severity: known_limitation

@@ -1,0 +1,139 @@
+{
+  "_version": "1.0.0",
+
+  "oci": {
+    "tenancy_ocid": "ocid1.tenancy.oc1..aaaa...",
+    "compartment_ocid": "ocid1.compartment.oc1..aaaa...",
+    "region": "us-ashburn-1",
+    "config_profile": "DEFAULT"
+  },
+
+  "networking": {
+    "vcn_ocid": "ocid1.vcn.oc1..aaaa...",
+    "subnet_ocid": "ocid1.subnet.oc1..aaaa...",
+
+    "_comment_nsg": "Use EITHER nsg_ocid (existing) OR create_nsg+nsg_rules (create new)",
+    "nsg_ocid": "ocid1.networksecuritygroup.oc1..aaaa...",
+    "create_nsg": false,
+
+    "nsg_rules": {
+      "_comment": "Only used when create_nsg is true and nsg_ocid is not set",
+      "oracle_ports": [1521, 1522],
+      "https_port": 443,
+      "source_cidr": "10.0.0.0/16"
+    }
+  },
+
+  "vault": {
+    "vault_ocid": "ocid1.vault.oc1..aaaa...",
+    "key_ocid": "ocid1.key.oc1..aaaa..."
+  },
+
+  "object_storage": {
+    "bucket_name": "dms-datapump-staging",
+    "namespace": "your_namespace"
+  },
+
+  "source_databases": {
+    "aws_oracle_prod": {
+      "display_name": "AWS Oracle Production",
+      "db_type": "oracle_onprem",
+      "host": "10.0.1.100",
+      "hostname": "oracle-prod.internal",
+      "port": 1521,
+      "service_name": "ORCL",
+      "is_cdb": true,
+      "pdb_name": "SALESPDB",
+      "username": "dms_admin",
+      "password": "your-secure-password",
+      "gg_username": "GGADMIN",
+      "gg_password": "your-gg-password",
+      "assessment_user": "DBSNMP",
+      "assessment_password": "dbsnmp-password"
+    }
+  },
+
+  "source_container_databases": {},
+
+  "target_databases": {
+    "adb_prod": {
+      "display_name": "ADB Production",
+      "adb_ocid": "ocid1.autonomousdatabase.oc1..aaaa...",
+      "username": "ADMIN",
+      "password": "your-adb-password",
+      "gg_username": "GGADMIN",
+      "gg_password": "your-gg-password"
+    }
+  },
+
+  "migrations": {
+    "hr_migration": {
+      "display_name": "HR Schema - AWS to ADB",
+      "migration_type": "ONLINE",
+      "source_db_key": "aws_oracle_prod",
+      "source_cdb_key": null,
+      "target_db_key": "adb_prod",
+      "include_allow_objects": ["HR.*"],
+      "exclude_objects": [],
+      "enable_reverse_replication": true,
+      "auto_validate": true,
+      "auto_start": false,
+      "auto_start_gg_processes": false,
+      "datapump_parameters": {
+        "parallelism": 4,
+        "compression": "METADATA_ONLY"
+      },
+      "tablespace_remap": { "USERS": "DATA" }
+    }
+  },
+
+  "goldengate": {
+    "deployment_name": "gg-migration-fallback",
+    "display_name": "GoldenGate Migration Fallback",
+    "license_model": "LICENSE_INCLUDED",
+    "cpu_core_count": 1,
+    "is_auto_scaling_enabled": true,
+    "admin_username": "oggadmin",
+    "admin_password": "your-gg-admin-password",
+    "extract_config": {
+      "extract_type": "INTEGRATED",
+      "trail_name": "EA",
+      "trail_size_mb": 500
+    },
+    "replicat_config": {
+      "replicat_type": "PARALLEL",
+      "map_parallelism": 4,
+      "bulk_applies": true
+    }
+  },
+
+  "monitoring": {
+    "enabled": true,
+    "notification_topic_ocid": "ocid1.onstopic.oc1..aaaa...",
+    "notification_emails": ["dba-team@company.com"],
+    "thresholds": {
+      "lag_warning_seconds": 60,
+      "lag_critical_seconds": 300,
+      "gg_cpu_warning_pct": 80,
+      "gg_cpu_critical_pct": 95,
+      "pre_cutover_max_lag_seconds": 30
+    }
+  },
+
+  "events": { "enabled": true },
+
+  "logging": {
+    "enabled": false,
+    "log_group_ocid": "",
+    "retention_days": 90
+  },
+
+  "assessment": {
+    "db_connector_preference": "auto",
+    "auto_remediate": false,
+    "remediation_user": "SYS",
+    "remediation_connect_as": "SYSDBA",
+    "generate_sql_script": true,
+    "output_format": "terminal"
+  }
+}
