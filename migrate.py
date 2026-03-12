@@ -27,7 +27,13 @@ from core.kb_loader import KnowledgeBase
 from core.db_connector import DBConnector
 
 
-def setup_logging(verbose: bool = False):
+def setup_logging(verbose: bool = False, quiet: bool = False):
+    if quiet:
+        # JSON output mode: suppress all logs and warnings for clean stdout
+        import warnings
+        warnings.filterwarnings("ignore")
+        logging.basicConfig(level=logging.CRITICAL + 1)
+        return
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
@@ -381,8 +387,47 @@ def cmd_validate_migration(args):
             response = dms_client.evaluate_migration(migration_id=dms_mig.id)
             work_request_id = response.headers.get("opc-work-request-id", "unknown")
             print(f"   ✅ Validation job submitted (work request: {work_request_id})")
-            print(f"   Use 'python3 migrate.py status --migration {mig_key} --json' to check results")
-            results.append({"key": mig_key, "name": display_name, "status": "submitted", "work_request": work_request_id})
+            result_entry = {"key": mig_key, "name": display_name, "status": "submitted", "work_request": work_request_id}
+
+            if args.wait:
+                import time
+                print(f"   Waiting for validation to complete...")
+                final_status = None
+                for i in range(120):  # up to 20 min
+                    try:
+                        wr = dms_client.get_work_request(work_request_id).data
+                        pct = wr.percent_complete or 0
+                        print(f"\r   Progress: {pct:.0f}% ({wr.status})", end="", flush=True)
+                        if wr.status in ("SUCCEEDED", "FAILED", "CANCELED"):
+                            print()
+                            final_status = wr.status
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(10)
+
+                result_entry["final_status"] = final_status or "TIMEOUT"
+
+                if final_status == "FAILED":
+                    print(f"   ❌ Validation FAILED for {display_name}")
+                    print(f"")
+                    print(f"   DMS evaluation fails silently when source DB prerequisites are not met.")
+                    print(f"   Common causes:")
+                    print(f"   - Missing privileges on migration user (DATAPUMP_EXP, GGADMIN)")
+                    print(f"   - Supplemental logging not enabled")
+                    print(f"   - GoldenGate replication parameter not set")
+                    print(f"   - Network connectivity issues (DMS cannot reach source DB)")
+                    print(f"")
+                    src_key = mig_config.get("source_db_key", "")
+                    print(f"   Run: python3 migrate.py assess --source {src_key}")
+                elif final_status == "SUCCEEDED":
+                    print(f"   ✅ Validation PASSED for {display_name}")
+                    print(f"   Ready to start: python3 migrate.py start-migration --migration {mig_key}")
+            else:
+                print(f"   Use --wait to poll for results, or check:")
+                print(f"   python3 migrate.py status --migration {mig_key} --json")
+
+            results.append(result_entry)
         except oci.exceptions.ServiceError as e:
             print(f"   ❌ Failed: {e.message}")
             results.append({"key": mig_key, "name": display_name, "status": "failed", "error": e.message})
@@ -440,6 +485,42 @@ def cmd_start_migration(args):
             print(f"❌ {display_name}: not found or not ACTIVE")
             continue
 
+        # Check for a failed evaluation job blocking start_migration
+        blocked_by_failed_eval = False
+        try:
+            mig_detail = dms.get_migration(dms_mig.id).data
+            exec_job_id = getattr(mig_detail, 'executing_job_id', None)
+            if exec_job_id:
+                exec_job = dms.get_job(exec_job_id).data
+                if exec_job.lifecycle_state == "FAILED" and getattr(exec_job, 'type', '') == "EVALUATION":
+                    blocked_by_failed_eval = True
+                    print(f"\n⚠️  {display_name}: blocked by a FAILED evaluation job")
+                    print(f"   Job OCID: {exec_job_id}")
+                    print(f"   Job type: EVALUATION | State: FAILED")
+                    print(f"")
+                    print(f"   This typically means source database prerequisites are not met:")
+                    print(f"   - Migration user privileges (DATAPUMP_EXP, GGADMIN)")
+                    print(f"   - Supplemental logging, archivelog mode, GoldenGate replication")
+                    print(f"   - Network connectivity from DMS to source DB")
+                    print(f"")
+                    print(f"   Recommended actions:")
+                    src_key = mig_config.get('source_db_key', '')
+                    print(f"   1. Run assessment:  python3 migrate.py assess --source {src_key}")
+                    print(f"   2. Fix prerequisites on the source database")
+                    print(f"   3. Re-validate:     python3 migrate.py validate-migration --migration {mig_key} --wait")
+                    print(f"   4. Then retry:      python3 migrate.py start-migration --migration {mig_key}")
+                    results.append({
+                        "key": mig_key, "name": display_name,
+                        "status": "blocked",
+                        "reason": "failed_evaluation_job",
+                        "failed_job_id": exec_job_id,
+                    })
+        except Exception as e:
+            logging.debug(f"Could not check executing job: {e}")
+
+        if blocked_by_failed_eval:
+            continue
+
         print(f"\n🚀 {display_name}: Starting migration job...")
         print(f"   Migration OCID: {dms_mig.id}")
         print(f"   Type: {dms_mig.type}")
@@ -485,6 +566,134 @@ def cmd_start_migration(args):
         started = sum(1 for r in results if r["status"] == "started")
         print(f"\nStarted {started}/{len(target_keys)} migration(s)")
         print("Monitor progress: python3 migrate.py status --json")
+
+
+def cmd_generate_wallet_script(args):
+    """Generate shell script to create SSL wallet on source DB server."""
+    config = MigrationConfig(args.config)
+    if not config.load():
+        print("❌ Configuration errors:")
+        for e in config.errors:
+            print(f"  • {e}")
+        sys.exit(1)
+
+    source_key = args.source or list(config.source_databases.keys())[0]
+    src = config.source_db(source_key)
+    if not src:
+        print(f"❌ Source '{source_key}' not found")
+        sys.exit(1)
+
+    region = config.oci.get("region", "us-ashburn-1")
+    wallet_dir = src.get("ssl_wallet_dir", "/u01/app/oracle/admin/dpdump")
+    dp_dir_name = src.get("datapump_dir_name", "DATA_PUMP_DIR")
+    dp_dir_path = src.get("datapump_dir_path", wallet_dir)
+    username = src.get("username", "DMS_USER")
+    gg_username = src.get("gg_username", "GGADMIN")
+
+    output_path = args.output or "setup-ssl-wallet.sh"
+
+    script = f"""#!/bin/bash
+# =============================================================================
+# SSL Wallet Setup for OCI DMS Data Pump via Object Storage
+# Generated by: oci-db-migrations-skill
+# Source DB: {source_key} ({src.get('host')}:{src.get('port')}/{src.get('service_name')})
+# Region: {region}
+# =============================================================================
+#
+# Run this script ON THE SOURCE DATABASE SERVER as the oracle user.
+# It downloads the OCI Object Storage root CA certificate and creates
+# an Oracle wallet that DMS needs for HTTPS Data Pump uploads.
+#
+# Prerequisites:
+#   - orapki must be in PATH (comes with Oracle DB installation)
+#   - Internet/proxy access to objectstorage.{region}.oraclecloud.com
+#   - Write access to {wallet_dir}
+# =============================================================================
+
+set -euo pipefail
+
+WALLET_DIR="{wallet_dir}"
+REGION="{region}"
+CERT_URL="https://objectstorage.${{REGION}}.oraclecloud.com"
+CERT_FILE="/tmp/oci-os-cert.pem"
+
+echo "=== Step 1: Create wallet directory ==="
+mkdir -p "$WALLET_DIR"
+echo "  Directory: $WALLET_DIR"
+
+echo ""
+echo "=== Step 2: Download OCI Object Storage root CA certificate ==="
+# Download the certificate chain from the Object Storage endpoint
+openssl s_client -connect objectstorage.${{REGION}}.oraclecloud.com:443 \\
+    -showcerts </dev/null 2>/dev/null | \\
+    awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/{{print}}' | \\
+    awk 'BEGIN{{n=0}} /BEGIN CERTIFICATE/{{n++}} n>0{{print > "/tmp/oci-os-cert-"n".pem"}}'
+
+# Use the root CA (last certificate in the chain)
+LAST_CERT=$(ls -1 /tmp/oci-os-cert-*.pem 2>/dev/null | tail -1)
+if [ -z "$LAST_CERT" ]; then
+    echo "  ERROR: Could not download certificate. Check network connectivity."
+    exit 1
+fi
+cp "$LAST_CERT" "$CERT_FILE"
+echo "  Certificate saved: $CERT_FILE"
+
+echo ""
+echo "=== Step 3: Create Oracle auto-login wallet ==="
+if [ -f "$WALLET_DIR/cwallet.sso" ]; then
+    echo "  Wallet already exists at $WALLET_DIR/cwallet.sso"
+    echo "  Adding certificate to existing wallet..."
+else
+    orapki wallet create -wallet "$WALLET_DIR" -auto_login_only
+    echo "  Wallet created: $WALLET_DIR/cwallet.sso"
+fi
+
+echo ""
+echo "=== Step 4: Add OCI certificate to wallet ==="
+orapki wallet add -wallet "$WALLET_DIR" \\
+    -trusted_cert -cert "$CERT_FILE" -auto_login_only
+echo "  Certificate added to wallet"
+
+echo ""
+echo "=== Step 5: Verify wallet contents ==="
+orapki wallet display -wallet "$WALLET_DIR" | grep -i "subject\\|trusted"
+
+echo ""
+echo "=== Step 6: Set permissions ==="
+chmod 640 "$WALLET_DIR"/cwallet.sso
+ls -la "$WALLET_DIR"/cwallet.sso
+
+echo ""
+echo "=== Done! ==="
+echo ""
+echo "Now run these SQL commands as SYS/SYSDBA to create the directory objects:"
+echo ""
+echo "  CREATE OR REPLACE DIRECTORY {dp_dir_name} AS '{dp_dir_path}';"
+echo "  CREATE OR REPLACE DIRECTORY SSL_WALLET_DIR AS '{wallet_dir}';"
+echo "  GRANT READ, WRITE ON DIRECTORY {dp_dir_name} TO {username};"
+echo "  GRANT READ, WRITE ON DIRECTORY {dp_dir_name} TO {gg_username};"
+echo "  GRANT READ ON DIRECTORY SSL_WALLET_DIR TO {username};"
+echo ""
+
+# Cleanup temp certs
+rm -f /tmp/oci-os-cert-*.pem "$CERT_FILE"
+"""
+
+    with open(output_path, "w") as f:
+        f.write(script)
+
+    os.chmod(output_path, 0o755)
+
+    print(f"✅ Wallet setup script generated: {output_path}")
+    print(f"")
+    print(f"   Source: {source_key} ({src.get('host')})")
+    print(f"   Region: {region}")
+    print(f"   Wallet dir: {wallet_dir}")
+    print(f"   DataPump dir: {dp_dir_name} -> {dp_dir_path}")
+    print(f"")
+    print(f"   Copy this script to the source DB server and run as oracle user:")
+    print(f"   scp {output_path} oracle@{src.get('host')}:/tmp/")
+    print(f"   ssh oracle@{src.get('host')} 'bash /tmp/{output_path}'")
 
 
 def cmd_cleanup(args):
@@ -622,11 +831,19 @@ def main():
     val_mig_parser = subparsers.add_parser("validate-migration",
                                             help="Run DMS premigration advisor (evaluate)")
     val_mig_parser.add_argument("--migration", help="Specific migration key (default: all)")
+    val_mig_parser.add_argument("--wait", action="store_true", help="Wait for validation to complete and show results")
     val_mig_parser.add_argument("--output", choices=["terminal", "json"], help="Output format")
 
     # -- diagnose --
     diag_parser = subparsers.add_parser("diagnose", help="Look up error in KB")
     diag_parser.add_argument("error_text", nargs="+", help="Error text to look up")
+
+    # -- generate-wallet-script --
+    wallet_parser = subparsers.add_parser("generate-wallet-script",
+                                           help="Generate SSL wallet setup script for source DB server")
+    wallet_parser.add_argument("--source", help="Source DB key (default: first source)")
+    wallet_parser.add_argument("--output", default="setup-ssl-wallet.sh",
+                               help="Output script path")
 
     # -- start-migration --
     start_parser = subparsers.add_parser("start-migration", help="Start (run) DMS migration jobs")
@@ -652,7 +869,9 @@ def main():
     status_parser.add_argument("--json", action="store_true", help="Output raw JSON (for AI skill)")
 
     args = parser.parse_args()
-    setup_logging(args.verbose)
+    # Detect JSON output mode: suppress logs/warnings for clean stdout
+    wants_json = getattr(args, 'json', False) or getattr(args, 'output', None) == 'json'
+    setup_logging(args.verbose, quiet=wants_json)
 
     # Also support --flags directly (backward compat)
     if not args.command:
@@ -686,6 +905,8 @@ def main():
         cmd_validate_config(args)
     elif args.command == "assess":
         cmd_assess(args)
+    elif args.command == "generate-wallet-script":
+        cmd_generate_wallet_script(args)
     elif args.command == "start-migration":
         cmd_start_migration(args)
     elif args.command == "cleanup":

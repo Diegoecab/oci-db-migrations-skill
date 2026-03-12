@@ -13,6 +13,7 @@ import logging
 import time
 from typing import Dict, Optional
 
+from core.config import resolve_password
 from operations.base import BaseOperation, OpResult, OpStatus
 
 logger = logging.getLogger(__name__)
@@ -120,7 +121,7 @@ class GoldenGateOperation(BaseOperation):
                         f"{src['host']}:{src['port']}/{src['service_name']}"
                     ),
                     username=src.get("gg_username", "GGADMIN"),
-                    password=src.get("gg_password"),
+                    password=resolve_password(src, "gg_password", label=src_conn_name),
                     subnet_id=subnet_ocid,
                 )
                 src_conn = self.oci.goldengate().create_connection(src_conn_details).data
@@ -139,7 +140,7 @@ class GoldenGateOperation(BaseOperation):
                     technology_type="ORACLE_AUTONOMOUS_DATABASE",
                     database_id=tgt["adb_ocid"],
                     username=tgt.get("gg_username", "GGADMIN"),
-                    password=tgt.get("gg_password"),
+                    password=resolve_password(tgt, "gg_password", label=tgt_conn_name),
                     subnet_id=subnet_ocid,
                 )
                 tgt_conn = self.oci.goldengate().create_connection(tgt_conn_details).data

@@ -10,37 +10,19 @@ Describe your migration scenario to an AI assistant. It assesses your databases,
 
 You interact with an **AI assistant** loaded with the project's `SKILL.md`. The skill transforms any capable LLM into an OCI DMS migration specialist. It reads your configuration, executes assessment and provisioning tools, interprets results, and tells you exactly what to do next.
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│  You: "I need to migrate HR and SALES schemas from our      │
-│        Oracle 19c on AWS RDS to an ADB-S in Ashburn.        │
-│        HR is critical and needs a rollback path."           │
-└─────────────────────────┬────────────────────────────────────┘
-                          │
-                          ▼
-┌──────────────────────────────────────────────────────────────┐
-│  AI Assistant (with SKILL.md):                               │
-│                                                              │
-│  1. Generates migration-config.json with correct             │
-│     RDS variant, 2 migrations (HR with GG fallback)         │
-│                                                              │
-│  2. Runs: migrate.py assess --source rds_prod --output json │
-│     → "3 blockers: GGADMIN missing, supplemental logging    │
-│        not on 5 tables, Data Pump dir needs grants"         │
-│                                                              │
-│  3. Generates remediation SQL, asks if you want to execute  │
-│                                                              │
-│  4. Re-assesses: "0 blockers. Ready."                       │
-│                                                              │
-│  5. Runs: migrate.py deploy                                  │
-│     → Verifies vault secrets and NSG, creates DMS           │
-│       connections, migrations, GoldenGate fallback          │
-│                                                              │
-│  6. Monitors: migrate.py status --json                       │
-│     → "Migration at cutover point. Lag: 12s. GG fallback   │
-│        ready. Recommendation: GO."                          │
-└──────────────────────────────────────────────────────────────┘
-```
+**You say:** *"I need to migrate HR and SALES schemas from Oracle 19c on AWS RDS to ADB-S in Ashburn. HR is critical and needs a rollback path."*
+
+**The AI assistant:**
+
+| Step | What it does | Command |
+|------|-------------|---------|
+| 1 | Generates `migration-config.json` with RDS variant, 2 migrations (HR with GG fallback) | *(auto-generated)* |
+| 2 | Assesses source DB — finds 3 blockers | `migrate.py assess --source rds_prod` |
+| 3 | Generates remediation SQL, asks before executing | `migrate.py assess --generate-sql` |
+| 4 | Re-assesses: 0 blockers, ready | `migrate.py assess --source rds_prod` |
+| 5 | Deploys: vault, NSG, DMS connections, migrations, GoldenGate | `migrate.py deploy` |
+| 6 | Validates and starts migration jobs | `migrate.py start-migration` |
+| 7 | Monitors progress, advises on cutover timing | `migrate.py status --json` |
 
 The AI skill never connects to databases directly. A Python tool layer handles all connectivity, authentication, and OCI API calls. The skill handles interpretation, decision logic, sequencing, and guidance.
 
@@ -54,8 +36,8 @@ The AI skill never connects to databases directly. A Python tool layer handles a
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/Diegoecab/oci-db-migrations-cli.git
-cd oci-db-migrations-cli
+git clone https://github.com/Diegoecab/oci-db-migrations-skill.git
+cd oci-db-migrations-skill
 chmod +x setup.sh && ./setup.sh    # Auto-detects Python, installs deps, creates ./migrate launcher
 
 # 2. Open your AI coding tool in this directory and say:
@@ -567,7 +549,7 @@ The built-in assessment (`./migrate assess`) covers all checks from the Oracle s
 ## File Structure
 
 ```
-oci-db-migrations-cli/
+oci-db-migrations-skill/
 ├── migrate.py                         # CLI entry point
 ├── migration-config.json.example      # Configuration template
 ├── migration-journal-config.json      # Pointer to journal location (tracked in git)

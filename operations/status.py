@@ -252,17 +252,44 @@ class StatusCollector:
 
     def _check_dms_job(self, migration_ocid: str) -> Optional[ResourceState]:
         try:
+            # Check executing_job_id first (may point to a failed evaluation)
+            mig_detail = self.oci.dms.get_migration(migration_ocid).data
+            exec_job_id = getattr(mig_detail, 'executing_job_id', None)
+
             jobs = self.oci.dms.list_migration_jobs(migration_id=migration_ocid).data.items
-            if jobs:
-                latest = jobs[0]  # Most recent
-                return ResourceState(
-                    resource_type="dms_job", name=latest.display_name or "job",
-                    ocid=latest.id, state=latest.lifecycle_state,
-                    details={
-                        "type": getattr(latest, 'type', None),
-                        "progress": getattr(latest, 'progress', None),
-                    },
+            if not jobs:
+                return None
+
+            # Prefer the executing job if it exists
+            target_job = jobs[0]
+            if exec_job_id:
+                for j in jobs:
+                    if j.id == exec_job_id:
+                        target_job = j
+                        break
+
+            job_type = getattr(target_job, 'type', None)
+            job_state = target_job.lifecycle_state
+
+            details = {
+                "type": job_type,
+                "progress": getattr(target_job, 'progress', None),
+            }
+
+            # Flag failed evaluation blocking start
+            if job_type == "EVALUATION" and job_state == "FAILED":
+                details["blocked"] = True
+                details["diagnosis"] = (
+                    "DMS evaluation failed — likely unmet source DB prerequisites "
+                    "(privileges, supplemental logging, connectivity). "
+                    "Run: python3 migrate.py assess --source <key>"
                 )
+
+            return ResourceState(
+                resource_type="dms_job", name=target_job.display_name or "job",
+                ocid=target_job.id, state=job_state,
+                details=details,
+            )
         except Exception as e:
             logger.debug(f"Cannot check DMS job: {e}")
         return None
@@ -301,9 +328,17 @@ class StatusCollector:
 
         state = mig.dms_migration.state if mig.dms_migration else ""
 
+        # Failed evaluation job blocking start
+        if mig.dms_job and mig.dms_job.details.get("blocked"):
+            actions.append(f"assess --source {mig.source_key}  # Check DB prerequisites")
+            actions.append("# Fix prerequisites, then re-validate:")
+            actions.append(f"validate-migration --migration {mig.migration_key} --wait")
+            actions.append(f"start-migration --migration {mig.migration_key}")
+            return actions
+
         if state == "ACTIVE" and not mig.dms_job:
             actions.append(f"assess --source {mig.source_key}  # Pre-flight check")
-            actions.append("# Then: start migration via deploy --step 4")
+            actions.append(f"start-migration --migration {mig.migration_key}")
 
         if state == "IN_PROGRESS":
             if mig.dms_job and mig.dms_job.state == "WAITING":

@@ -69,7 +69,7 @@ def generate_skill(output_path: str = None):
     lines.extend([
         "## Identity",
         "",
-        "You are an Oracle Database Migration specialist embedded in the `oci-db-migrations-cli` toolset.",
+        "You are an Oracle Database Migration specialist embedded in the `oci-db-migrations-skill` toolset.",
         "You help users plan, configure, execute, troubleshoot, and validate migrations from Oracle databases",
         "(on-premises, AWS RDS, ExaCS) to OCI Autonomous Database using OCI DMS and OCI GoldenGate.",
         "",

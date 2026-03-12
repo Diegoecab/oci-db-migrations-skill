@@ -37,11 +37,12 @@
       "is_cdb": true,
       "pdb_name": "SALESPDB",
       "username": "dms_admin",
-      "password": "your-secure-password",
+      "_comment_passwords": "Passwords resolved at runtime: env var DMS_PASSWORD_<KEY>, or interactive prompt. Never stored in JSON.",
       "gg_username": "GGADMIN",
-      "gg_password": "your-gg-password",
       "assessment_user": "DBSNMP",
-      "assessment_password": "dbsnmp-password"
+      "datapump_dir_name": "DATA_PUMP_DIR",
+      "datapump_dir_path": "/u01/app/oracle/admin/ORCL/dpdump",
+      "ssl_wallet_dir": "/u01/app/oracle/admin/ORCL/dpdump"
     }
   },
 
@@ -52,9 +53,7 @@
       "display_name": "ADB Production",
       "adb_ocid": "ocid1.autonomousdatabase.oc1..aaaa...",
       "username": "ADMIN",
-      "password": "your-adb-password",
-      "gg_username": "GGADMIN",
-      "gg_password": "your-gg-password"
+      "gg_username": "GGADMIN"
     }
   },
 
@@ -65,6 +64,7 @@
       "source_db_key": "aws_oracle_prod",
       "source_cdb_key": null,
       "target_db_key": "adb_prod",
+      "migration_scope": "SCHEMA",
       "include_allow_objects": ["HR.*"],
       "exclude_objects": [],
       "enable_reverse_replication": true,
@@ -86,7 +86,7 @@
     "cpu_core_count": 1,
     "is_auto_scaling_enabled": true,
     "admin_username": "oggadmin",
-    "admin_password": "your-gg-admin-password",
+    "_comment_admin_password": "Set env var DMS_ADMIN_PASSWORD_<KEY> or will prompt at runtime",
     "extract_config": {
       "extract_type": "INTEGRATED",
       "trail_name": "EA",

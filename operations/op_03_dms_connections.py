@@ -15,6 +15,7 @@ Compatible with both old and new OCI SDK versions:
 import logging
 from typing import Optional
 
+from core.config import resolve_password
 from operations.base import BaseOperation, OpResult, OpStatus
 
 logger = logging.getLogger(__name__)
@@ -177,7 +178,7 @@ class DMSConnectionsOperation(BaseOperation):
                         f"(CONNECT_DATA=(SERVICE_NAME={src['service_name']})))"
                     ),
                     username=src["username"],
-                    password=src["password"],
+                    password=resolve_password(src, "password", label=conn_name),
                     vault_id=vault_ocid,
                     key_id=key_ocid,
                     subnet_id=subnet_ocid,
@@ -187,7 +188,7 @@ class DMSConnectionsOperation(BaseOperation):
                 # Add replication credentials for ONLINE migrations (GoldenGate CDC)
                 if src.get("gg_username"):
                     conn_kwargs["replication_username"] = src["gg_username"]
-                    conn_kwargs["replication_password"] = src["gg_password"]
+                    conn_kwargs["replication_password"] = resolve_password(src, "gg_password", label=f"{conn_name} GoldenGate")
 
                 details = _create_oracle_connection_details(
                     oci.database_migration.models, **conn_kwargs)
@@ -230,7 +231,7 @@ class DMSConnectionsOperation(BaseOperation):
                         f"(CONNECT_DATA=(SERVICE_NAME={cdb['service_name']})))"
                     ),
                     username=cdb["username"],
-                    password=cdb["password"],
+                    password=resolve_password(cdb, "password", label=conn_name),
                     vault_id=vault_ocid,
                     key_id=key_ocid,
                     subnet_id=subnet_ocid,
@@ -268,7 +269,7 @@ class DMSConnectionsOperation(BaseOperation):
                     technology_type="OCI_AUTONOMOUS_DATABASE",
                     database_id=tgt["adb_ocid"],
                     username=tgt["username"],
-                    password=tgt["password"],
+                    password=resolve_password(tgt, "password", label=conn_name),
                     vault_id=vault_ocid,
                     key_id=key_ocid,
                     subnet_id=subnet_ocid,
@@ -278,7 +279,7 @@ class DMSConnectionsOperation(BaseOperation):
                 # Add replication credentials for ONLINE migrations (GoldenGate CDC)
                 if tgt.get("gg_username"):
                     conn_kwargs["replication_username"] = tgt["gg_username"]
-                    conn_kwargs["replication_password"] = tgt["gg_password"]
+                    conn_kwargs["replication_password"] = resolve_password(tgt, "gg_password", label=f"{conn_name} GoldenGate")
 
                 details = _create_oracle_connection_details(
                     oci.database_migration.models, **conn_kwargs)

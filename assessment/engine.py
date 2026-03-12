@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set
 
-from core.config import MigrationConfig
+from core.config import MigrationConfig, resolve_password
 from core.db_connector import DBConnector, BaseConnector, QueryResult
 from core.kb_loader import KnowledgeBase
 from core.oci_client import OCIClientFactory
@@ -630,9 +630,9 @@ class AssessmentEngine:
 
         ctx = {
             "gg_username": src.get("gg_username", "GGADMIN"),
-            "gg_password": src.get("gg_password", ""),
+            "gg_password": resolve_password(src, "gg_password", label=f"{source_key} GoldenGate"),
             "username": src.get("username", ""),
-            "password": src.get("password", ""),
+            "password": resolve_password(src, "password", label=source_key),
             "pdb_name": src.get("pdb_name", ""),
             "host": src.get("host", ""),
             "port": str(src.get("port", 1521)),
@@ -642,7 +642,7 @@ class AssessmentEngine:
 
         # Connect using assessment user (read-only)
         assess_user = src.get("assessment_user", src.get("username", ""))
-        assess_pass = src.get("assessment_password", src.get("password", ""))
+        assess_pass = resolve_password(src, "assessment_password", label=f"{source_key} assessment")
         preference = self.config.assessment_config.get("db_connector_preference", "auto")
 
         connector = None
@@ -718,9 +718,9 @@ class AssessmentEngine:
         ctx = {
             "adb_ocid": tgt.get("adb_ocid", ""),
             "username": tgt.get("username", "ADMIN"),
-            "password": tgt.get("password", ""),
+            "password": resolve_password(tgt, "password", label=f"target:{target_key}"),
             "gg_username": tgt.get("gg_username", "GGADMIN"),
-            "gg_password": tgt.get("gg_password", ""),
+            "gg_password": resolve_password(tgt, "gg_password", label=f"target:{target_key} GoldenGate"),
             "namespace": self.config.object_storage.get("namespace", ""),
             "bucket_name": self.config.object_storage.get("bucket_name", ""),
             **{k: v for k, v in self.config.oci.items()},

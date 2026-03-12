@@ -112,13 +112,19 @@ class DMSMigrationOperation(BaseOperation):
                 errors.append(f"{mig_key}: target connection '{tgt_conn_name}' not found")
                 continue
 
-            # Build object mapping
-            include_objects = self._parse_object_list(mig.get("include_allow_objects", []))
-            exclude_objects = self._parse_object_list(mig.get("exclude_objects", []))
+            # Build object mapping (only for SCHEMA scope)
+            migration_scope = mig.get("migration_scope", "SCHEMA")
+            include_objects = []
+            exclude_objects = []
+            if migration_scope == "SCHEMA":
+                include_objects = self._parse_object_list(mig.get("include_allow_objects", []))
+                exclude_objects = self._parse_object_list(mig.get("exclude_objects", []))
 
-            # Data transfer config
+            # Data transfer and datapump config
             dp_params = mig.get("datapump_parameters", {})
             tablespace_remap = mig.get("tablespace_remap", {})
+            src_db = self.config.source_db(mig["source_db_key"])
+            models = oci.database_migration.models
 
             try:
                 # Build migration details
@@ -130,23 +136,75 @@ class DMSMigrationOperation(BaseOperation):
                     "target_database_connection_id": tgt_conn_id,
                 }
 
-                # Add GoldenGate settings for ONLINE
+                # --- Data Transfer Medium: Object Storage ---
+                bucket_name = self.config.object_storage.get("bucket_name")
+                if bucket_name:
+                    obj_storage_bucket = None
+                    if hasattr(models, 'ObjectStoreBucket'):
+                        obj_storage_bucket = models.ObjectStoreBucket(
+                            namespace_name=self.config.object_storage.get("namespace", ""),
+                            bucket_name=bucket_name,
+                        )
+
+                    if hasattr(models, 'CreateOracleObjectStorageDataTransferMediumDetails'):
+                        dtm_kwargs = {}
+                        if obj_storage_bucket:
+                            dtm_kwargs["object_storage_bucket"] = obj_storage_bucket
+                        migration_kwargs["data_transfer_medium_details"] = \
+                            models.CreateOracleObjectStorageDataTransferMediumDetails(**dtm_kwargs)
+
+                # --- Initial Load Settings: job_mode, datapump params, directory, tablespace remap ---
+                job_mode = "FULL" if migration_scope == "FULL" else "SCHEMA"
+
+                initial_load_kwargs = {"job_mode": job_mode}
+
+                # Data Pump parameters (parallelism, compression, etc.)
+                if dp_params and hasattr(models, 'CreateDataPumpParameters'):
+                    dp_kwargs = {}
+                    if dp_params.get("parallelism"):
+                        dp_kwargs["export_parallelism_degree"] = dp_params["parallelism"]
+                        dp_kwargs["import_parallelism_degree"] = dp_params["parallelism"]
+                    initial_load_kwargs["data_pump_parameters"] = \
+                        models.CreateDataPumpParameters(**dp_kwargs)
+
+                # Export directory object (from source DB config)
+                dp_dir_name = src_db.get("datapump_dir_name", "DATA_PUMP_DIR")
+                dp_dir_path = src_db.get("datapump_dir_path")
+                if dp_dir_path and hasattr(models, 'CreateDirectoryObject'):
+                    initial_load_kwargs["export_directory_object"] = \
+                        models.CreateDirectoryObject(name=dp_dir_name, path=dp_dir_path)
+
+                # Tablespace remap (e.g., USERS -> DATA for ADB Serverless)
+                if tablespace_remap:
+                    metadata_remaps = []
+                    for old_ts, new_ts in tablespace_remap.items():
+                        metadata_remaps.append(models.MetadataRemap(
+                            type="TABLESPACE", old_value=old_ts, new_value=new_ts
+                        ))
+                    if metadata_remaps:
+                        initial_load_kwargs["metadata_remaps"] = metadata_remaps
+
+                if hasattr(models, 'CreateOracleInitialLoadSettings'):
+                    migration_kwargs["initial_load_settings"] = \
+                        models.CreateOracleInitialLoadSettings(**initial_load_kwargs)
+
+                # --- GoldenGate settings for ONLINE ---
                 if mig["migration_type"] == "ONLINE":
-                    gg_settings = {
+                    ggs_kwargs = {
                         "acceptable_lag": self.config.monitoring.get("thresholds", {}).get(
                             "lag_critical_seconds", 300
                         ),
                     }
+                    if src_db.get("gg_username") and hasattr(models, 'CreateExtract'):
+                        ggs_kwargs["extract"] = models.CreateExtract(
+                            performance_profile="MEDIUM",
+                        )
+                    if hasattr(models, 'CreateOracleGgsDeploymentDetails'):
+                        migration_kwargs["ggs_details"] = \
+                            models.CreateOracleGgsDeploymentDetails(**ggs_kwargs)
 
-                    # Source GG config
-                    src_db = self.config.source_db(mig["source_db_key"])
-                    if src_db.get("gg_username"):
-                        gg_settings["extract"] = {
-                            "performance_profile": "MEDIUM",
-                        }
-
-                # Include/exclude objects
-                DbObjectModel = _get_db_object_model(oci.database_migration.models)
+                # --- Include/exclude objects (SCHEMA scope only) ---
+                DbObjectModel = _get_db_object_model(models)
                 if include_objects:
                     migration_kwargs["include_objects"] = [
                         DbObjectModel(**obj)
@@ -166,7 +224,7 @@ class DMSMigrationOperation(BaseOperation):
                     if cdb_conn_id:
                         migration_kwargs["source_container_database_connection_id"] = cdb_conn_id
 
-                MigrationModel = _get_migration_model(oci.database_migration.models)
+                MigrationModel = _get_migration_model(models)
                 details = MigrationModel(**migration_kwargs)
 
                 response = self.oci.dms.create_migration(details)

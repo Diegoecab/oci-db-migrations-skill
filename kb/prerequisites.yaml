@@ -227,17 +227,19 @@ source_database:
       GRANT CONNECT, RESOURCE, DATAPUMP_EXP_FULL_DATABASE, DATAPUMP_IMP_FULL_DATABASE TO {username};
 
   # --- Data Pump ---
+  # datapump_dir_name and datapump_dir_path come from source_databases config.
+  # The user must provide these values — they vary per database installation.
   - id: DATAPUMP_DIR
     category: datapump
-    description: "Data Pump directory exists"
+    description: "Data Pump directory exists (from config: datapump_dir_name)"
     check_type: sql
-    sql: "SELECT DIRECTORY_NAME, DIRECTORY_PATH FROM DBA_DIRECTORIES WHERE DIRECTORY_NAME = 'DATA_PUMP_DIR'"
+    sql: "SELECT DIRECTORY_NAME, DIRECTORY_PATH FROM DBA_DIRECTORIES WHERE DIRECTORY_NAME = UPPER('{datapump_dir_name}')"
     expected: "row_exists"
     severity: blocker
     remediation: |
-      CREATE OR REPLACE DIRECTORY DATA_PUMP_DIR AS '/u01/app/oracle/datapump';
-      GRANT READ, WRITE ON DIRECTORY DATA_PUMP_DIR TO {username};
-      GRANT READ, WRITE ON DIRECTORY DATA_PUMP_DIR TO {gg_username};
+      CREATE OR REPLACE DIRECTORY {datapump_dir_name} AS '{datapump_dir_path}';
+      GRANT READ, WRITE ON DIRECTORY {datapump_dir_name} TO {username};
+      GRANT READ, WRITE ON DIRECTORY {datapump_dir_name} TO {gg_username};
     variants:
       oracle_rds: { severity: info, notes: "Pre-configured on RDS" }
 
@@ -247,12 +249,41 @@ source_database:
     check_type: sql
     sql: |
       SELECT GRANTEE, PRIVILEGE FROM DBA_TAB_PRIVS
-      WHERE TABLE_NAME = 'DATA_PUMP_DIR'
+      WHERE TABLE_NAME = UPPER('{datapump_dir_name}')
       AND GRANTEE IN (UPPER('{username}'), UPPER('{gg_username}'))
     expected: "READ and WRITE for both users"
     severity: blocker
-    remediation_template: "GRANT READ, WRITE ON DIRECTORY DATA_PUMP_DIR TO {missing_user};"
+    remediation_template: "GRANT READ, WRITE ON DIRECTORY {datapump_dir_name} TO {missing_user};"
     depends_on: [DATAPUMP_DIR]
+
+  # --- SSL Wallet for Object Storage ---
+  # DMS Data Pump uses HTTPS to upload dump files to OCI Object Storage.
+  # The source DB needs an SSL wallet (cwallet.sso) with the OCI Object Storage
+  # certificate. The wallet must be in the ssl_wallet_dir specified in config
+  # (typically the same directory as datapump_dir_path or the Oracle wallet dir).
+  # See: https://docs.oracle.com/en-us/iaas/database-migration/doc/prerequisites-oracle-migrations.html
+  - id: SSL_WALLET_DIR
+    category: datapump
+    description: "SSL wallet directory for Object Storage HTTPS access"
+    check_type: sql
+    sql: "SELECT DIRECTORY_NAME, DIRECTORY_PATH FROM DBA_DIRECTORIES WHERE DIRECTORY_NAME = 'SSL_WALLET_DIR'"
+    expected: "row_exists"
+    severity: blocker
+    remediation: |
+      -- Create the wallet directory (must match ssl_wallet_dir in config):
+      CREATE OR REPLACE DIRECTORY SSL_WALLET_DIR AS '{ssl_wallet_dir}';
+      GRANT READ ON DIRECTORY SSL_WALLET_DIR TO {username};
+      --
+      -- Then download the OCI Object Storage SSL certificate and create the wallet:
+      -- 1. Download from: https://objectstorage.{region}.oraclecloud.com (get root CA cert)
+      -- 2. On the DB server:
+      --    mkdir -p {ssl_wallet_dir}
+      --    orapki wallet create -wallet {ssl_wallet_dir} -auto_login_only
+      --    orapki wallet add -wallet {ssl_wallet_dir} -trusted_cert -cert /path/to/oci-ca-cert.pem -auto_login_only
+      -- 3. Verify: orapki wallet display -wallet {ssl_wallet_dir}
+      -- The cwallet.sso file must exist in {ssl_wallet_dir}
+    variants:
+      oracle_rds: { severity: info, notes: "RDS handles Object Storage connectivity internally" }
 
   # --- Schema Analysis ---
   - id: SCHEMA_EXISTS

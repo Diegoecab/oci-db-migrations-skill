@@ -10,10 +10,53 @@ import json
 import logging
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_password(db_config, field="password", label=None):
+    """
+    Resolve a password from environment variable, then config, then prompt.
+
+    Lookup order:
+      1. Environment variable: DMS_<FIELD>_<KEY> (e.g., DMS_PASSWORD_BASEDB_PDB1)
+         The env var name is stored in config as <field>_env_var.
+      2. Config value (for backward compatibility — will be removed).
+      3. Interactive prompt (if running in a terminal).
+
+    Returns the password string, or raises ValueError if not found.
+    """
+    if label is None:
+        label = db_config.get("display_name", "database")
+
+    # 1. Check explicit env var name from config
+    env_var_name = db_config.get(f"{field}_env_var")
+    if env_var_name and os.environ.get(env_var_name):
+        return os.environ[env_var_name]
+
+    # 2. Auto-generate env var name from convention: DMS_<FIELD>_<KEY>
+    # e.g., DMS_PASSWORD_BASEDB_PDB1, DMS_GG_PASSWORD_BASEDB_PDB1
+    for key_hint in ("_key", "display_name", "username"):
+        hint = db_config.get(key_hint, "")
+        if hint:
+            auto_env = f"DMS_{field.upper()}_{hint.upper().replace(' ', '_').replace('-', '_')}"
+            if os.environ.get(auto_env):
+                return os.environ[auto_env]
+
+    # 3. Config value (backward compat — passwords in JSON)
+    if db_config.get(field):
+        return db_config[field]
+
+    # 4. Interactive prompt (only if terminal)
+    if hasattr(sys, 'stdin') and sys.stdin.isatty():
+        import getpass
+        return getpass.getpass(f"  Password for {label} ({field}): ")
+
+    raise ValueError(f"Password not found for {label} ({field}). "
+                     f"Set env var DMS_{field.upper()}_<KEY> or pass via config.")
 
 
 # =============================================================================
@@ -63,8 +106,8 @@ class MigrationConfig:
 
     REQUIRED_SECTIONS = ["oci", "source_databases", "target_databases", "migrations"]
     REQUIRED_OCI = ["tenancy_ocid", "compartment_ocid", "region"]
-    REQUIRED_SOURCE_FIELDS = ["host", "port", "service_name", "username", "password"]
-    REQUIRED_TARGET_FIELDS = ["adb_ocid", "username", "password"]
+    REQUIRED_SOURCE_FIELDS = ["host", "port", "service_name", "username"]
+    REQUIRED_TARGET_FIELDS = ["adb_ocid", "username"]
     REQUIRED_MIGRATION_FIELDS = ["migration_type", "source_db_key", "target_db_key"]
 
     def __init__(self, config_path: str):
@@ -210,6 +253,23 @@ class MigrationConfig:
                     f"source_databases.{key}: 'hostname' not set. "
                     "DMS requires FQDN, not IP. Add a hostname field."
                 )
+            # Data Pump directory config
+            if not src.get("datapump_dir_name"):
+                self._warnings.append(
+                    f"source_databases.{key}: 'datapump_dir_name' not set. "
+                    "Defaulting to 'DATA_PUMP_DIR'. Set the actual Oracle directory name."
+                )
+            if not src.get("datapump_dir_path"):
+                self._warnings.append(
+                    f"source_databases.{key}: 'datapump_dir_path' not set. "
+                    "Required for remediation — set the OS path on the DB server."
+                )
+            if not src.get("ssl_wallet_dir"):
+                self._warnings.append(
+                    f"source_databases.{key}: 'ssl_wallet_dir' not set. "
+                    "Required for Data Pump via Object Storage (HTTPS). "
+                    "Set the path where the SSL wallet (cwallet.sso) is/will be."
+                )
 
     def _validate_targets(self):
         if not self.target_databases:
@@ -265,6 +325,18 @@ class MigrationConfig:
                         f"migrations.{key}: invalid object '{obj}' — "
                         "use 'SCHEMA.*' or 'SCHEMA.TABLE' format"
                     )
+
+            # Migration scope
+            scope = mig.get("migration_scope", "SCHEMA")
+            if scope not in ("SCHEMA", "FULL"):
+                self._errors.append(
+                    f"migrations.{key}.migration_scope must be SCHEMA or FULL"
+                )
+            if scope == "FULL" and (includes or excludes):
+                self._warnings.append(
+                    f"migrations.{key}: migration_scope=FULL ignores "
+                    "include_allow_objects and exclude_objects"
+                )
 
             # Migration type
             mig_type = mig.get("migration_type", "")
