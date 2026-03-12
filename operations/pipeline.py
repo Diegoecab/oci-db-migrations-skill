@@ -32,7 +32,7 @@ STEPS: List[Dict] = [
     {
         "step": 2,
         "name": "network-nsg",
-        "description": "Create Network Security Group with migration rules",
+        "description": "Verify existing NSG has required configuration",
         "module": "operations.op_02_network_nsg",
         "class": "NetworkNSGOperation",
     },

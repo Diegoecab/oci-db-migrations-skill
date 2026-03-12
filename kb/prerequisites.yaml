@@ -355,7 +355,7 @@ target_adb:
     description: "ADB wallet downloadable"
     check_type: oci_sdk
     sdk_call: "database_client.generate_autonomous_database_wallet"
-    expected: "wallet_bytes > 0"
+    expected: "gte:1"
     severity: blocker
     remediation: "Check ADB AVAILABLE, IAM 'read autonomous-database-family', ADMIN password set."
 

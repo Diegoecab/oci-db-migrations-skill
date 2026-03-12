@@ -33,8 +33,8 @@ You interact with an **AI assistant** loaded with the project's `SKILL.md`. The 
 │  4. Re-assesses: "0 blockers. Ready."                       │
 │                                                              │
 │  5. Runs: migrate.py deploy                                  │
-│     → Creates vault secrets, NSG, DMS connections,          │
-│       migrations, GoldenGate fallback                       │
+│     → Verifies vault secrets and NSG, creates DMS           │
+│       connections, migrations, GoldenGate fallback          │
 │                                                              │
 │  6. Monitors: migrate.py status --json                       │
 │     → "Migration at cutover point. Lag: 12s. GG fallback   │
@@ -205,6 +205,62 @@ python ai/generate_skill.py
 
 ---
 
+## Migration Journal — Team Collaboration
+
+The migration journal is a shared audit log that tracks every action, decision, and pipeline state across sessions and team members. It enables anyone on the team (or any new AI session) to pick up a migration exactly where it was left off.
+
+### How It Works
+
+```
+migration-journal-config.json    ← Tracked in git. Points to the journal location.
+         │
+         ▼
+migration-journal.json           ← NOT in git. Contains the full history.
+```
+
+- **`migration-journal-config.json`** is committed to the repo and contains only the path to the journal file
+- **`migration-journal.json`** is the actual journal — it is gitignored because it contains operational history and may include sensitive context
+
+### Storage Options
+
+The journal path in `migration-journal-config.json` can point to:
+
+| Location | Example | Best For |
+|----------|---------|----------|
+| Local (default) | `./migration-journal.json` | Single-user or dev/test |
+| NFS mount | `/mnt/shared/migrations/journal.json` | Team collaboration |
+| Shared filesystem | `/efs/dba-team/project-x/journal.json` | AWS environments |
+
+When the AI skill starts a session, it reads the pointer file, locates the journal, and resumes from the last known state. If the journal doesn't exist at the configured path, it asks where to create it.
+
+### What Gets Tracked
+
+| Section | Contents |
+|---------|----------|
+| `project` | Migration name, description, region, creation date |
+| `team` | OS users and hostnames that have participated (auto-detected) |
+| `pipeline_state` | Current status of each migration step (completed/pending/failed/skipped) |
+| `entries` | Chronological log of every action: who, what, when, result |
+| `decisions` | Key choices made during the migration and their reasoning |
+
+Each entry includes an ISO 8601 timestamp and the OS user@hostname, auto-detected from the environment.
+
+### Example Entry
+
+```json
+{
+  "id": 5,
+  "timestamp": "2026-03-12T14:30:00Z",
+  "user": "jsmith@dba-workstation-01",
+  "action": "assess",
+  "phase": "Pre-flight",
+  "description": "Source DB assessment completed. 2 blockers found: supplemental logging missing on 5 tables, GGADMIN lacks 3 privileges.",
+  "result": "warning"
+}
+```
+
+---
+
 ## What It Does Step by Step
 
 ### 1. Environment Check
@@ -250,13 +306,13 @@ Generates a ready-to-execute SQL script from all failed checks, with comments ex
 
 Idempotent pipeline (every step checks if resources exist before creating):
 
-| Step | Operation | Resources Created |
-|------|-----------|-------------------|
-| 1 | Vault Secrets | Base64-encoded credentials in OCI Vault |
-| 2 | Network NSG | Security group with Oracle port rules |
-| 3 | DMS Connections | Source + target database connections |
-| 4 | DMS Migrations | Migration definitions with auto-validate/start |
-| 5 | GoldenGate | Deployment + reverse replication (if enabled) |
+| Step | Operation | Action |
+|------|-----------|--------|
+| 1 | Vault Secrets | Verify pre-created secrets exist and are ACTIVE |
+| 2 | Network NSG | Verify existing NSG is AVAILABLE with rules |
+| 3 | DMS Connections | Create source + target database connections |
+| 4 | DMS Migrations | Create migration definitions with auto-validate/start |
+| 5 | GoldenGate | Create deployment + reverse replication (if enabled) |
 
 ### 5. State Monitoring
 
@@ -279,7 +335,7 @@ Key sections:
 ```jsonc
 {
   "oci": { /* tenancy, compartment, region, config profile */ },
-  "networking": { /* VCN, subnet, NSG rules */ },
+  "networking": { /* VCN, subnet, NSG OCID (pre-existing) */ },
   "vault": { /* vault OCID, encryption key OCID */ },
   "object_storage": { /* bucket for Data Pump staging */ },
 
@@ -474,6 +530,8 @@ Policy: Allow dynamic-group GGDeployments to read secret-bundles in compartment 
 oci-db-migrations-cli/
 ├── migrate.py                         # CLI entry point
 ├── migration-config.json.example      # Configuration template
+├── migration-journal-config.json      # Pointer to journal location (tracked in git)
+├── migration-journal.json             # Team audit log (NOT in git, gitignored)
 ├── requirements.txt                   # Python dependencies
 │
 ├── kb/                                # Knowledge Base
@@ -496,8 +554,8 @@ oci-db-migrations-cli/
 │   ├── base.py                        # Idempotent operation pattern
 │   ├── pipeline.py                    # Step orchestrator
 │   ├── status.py                      # Resource state snapshot
-│   ├── op_01_vault_secrets.py         # Vault credential management
-│   ├── op_02_network_nsg.py           # NSG creation
+│   ├── op_01_vault_secrets.py         # Verify pre-created vault secrets (read-only)
+│   ├── op_02_network_nsg.py           # Verify existing NSG (read-only)
 │   ├── op_03_dms_connections.py       # DMS connections
 │   ├── op_04_dms_migration.py         # Migration create + validate + start
 │   └── op_05_goldengate.py            # GG deployment + reverse replication

@@ -324,6 +324,76 @@ def cmd_status(args):
         print()
 
 
+def cmd_validate_migration(args):
+    """Run DMS premigration advisor (evaluate) on migrations."""
+    config = MigrationConfig(args.config)
+    if not config.load():
+        print("❌ Configuration errors:")
+        for e in config.errors:
+            print(f"  • {e}")
+        sys.exit(1)
+
+    try:
+        from core.oci_client import OCIClientFactory
+        oci_factory = OCIClientFactory(
+            config_profile=config.oci.get("config_profile", "DEFAULT"),
+            region=config.oci.get("region"),
+        )
+    except Exception as e:
+        print(f"❌ OCI SDK required: {e}")
+        sys.exit(1)
+
+    import oci
+
+    dms_client = oci_factory.dms
+
+    # Get migration OCIDs from DMS by matching display names
+    compartment = config.oci["compartment_ocid"]
+    all_migrations = dms_client.list_migrations(compartment_id=compartment).data
+
+    # Filter to migrations from config
+    target_keys = [args.migration] if args.migration else list(config.migrations.keys())
+    results = []
+
+    for mig_key in target_keys:
+        mig_config = config.migrations.get(mig_key)
+        if not mig_config:
+            print(f"❌ Migration key '{mig_key}' not found in config")
+            continue
+
+        display_name = mig_config.get("display_name", mig_key)
+
+        # Find matching DMS migration
+        dms_mig = None
+        for m in all_migrations.items:
+            if m.display_name == display_name and m.lifecycle_state == "ACTIVE":
+                dms_mig = m
+                break
+
+        if not dms_mig:
+            print(f"❌ {display_name}: DMS migration not found or not ACTIVE")
+            continue
+
+        print(f"\n⏳ {display_name}: Starting DMS premigration validation...")
+        print(f"   Migration OCID: {dms_mig.id}")
+
+        try:
+            response = dms_client.evaluate_migration(migration_id=dms_mig.id)
+            work_request_id = response.headers.get("opc-work-request-id", "unknown")
+            print(f"   ✅ Validation job submitted (work request: {work_request_id})")
+            print(f"   Use 'python3 migrate.py status --migration {mig_key} --json' to check results")
+            results.append({"key": mig_key, "name": display_name, "status": "submitted", "work_request": work_request_id})
+        except oci.exceptions.ServiceError as e:
+            print(f"   ❌ Failed: {e.message}")
+            results.append({"key": mig_key, "name": display_name, "status": "failed", "error": e.message})
+
+    if args.output == "json":
+        print(json.dumps(results, indent=2))
+
+    if not results:
+        print("No migrations found to validate.")
+
+
 def cmd_diagnose(args):
     """Look up error in KB."""
     kb = KnowledgeBase()
@@ -383,6 +453,12 @@ def main():
     assess_parser.add_argument("--remediate", action="store_true",
                                help="Execute remediation interactively")
 
+    # -- validate-migration --
+    val_mig_parser = subparsers.add_parser("validate-migration",
+                                            help="Run DMS premigration advisor (evaluate)")
+    val_mig_parser.add_argument("--migration", help="Specific migration key (default: all)")
+    val_mig_parser.add_argument("--output", choices=["terminal", "json"], help="Output format")
+
     # -- diagnose --
     diag_parser = subparsers.add_parser("diagnose", help="Look up error in KB")
     diag_parser.add_argument("error_text", nargs="+", help="Error text to look up")
@@ -437,6 +513,8 @@ def main():
         cmd_deploy(args)
     elif args.command == "status":
         cmd_status(args)
+    elif args.command == "validate-migration":
+        cmd_validate_migration(args)
     elif args.command == "diagnose":
         cmd_diagnose(args)
     else:

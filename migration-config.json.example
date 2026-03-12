@@ -12,16 +12,8 @@
     "vcn_ocid": "ocid1.vcn.oc1..aaaa...",
     "subnet_ocid": "ocid1.subnet.oc1..aaaa...",
 
-    "_comment_nsg": "Use EITHER nsg_ocid (existing) OR create_nsg+nsg_rules (create new)",
-    "nsg_ocid": "ocid1.networksecuritygroup.oc1..aaaa...",
-    "create_nsg": false,
-
-    "nsg_rules": {
-      "_comment": "Only used when create_nsg is true and nsg_ocid is not set",
-      "oracle_ports": [1521, 1522],
-      "https_port": 443,
-      "source_cidr": "10.0.0.0/16"
-    }
+    "_comment_nsg": "NSG must be pre-created with required rules (Oracle ports 1521/1522, HTTPS 443). The tool only verifies it exists.",
+    "nsg_ocid": "ocid1.networksecuritygroup.oc1..aaaa..."
   },
 
   "vault": {

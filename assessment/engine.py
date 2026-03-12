@@ -254,13 +254,18 @@ class CheckExecutor:
                 notes="No schemas in scope"
             )
 
+        if not self.connector:
+            return CheckResult(
+                check_id=check["id"], description=check.get("description", ""),
+                category=check.get("category", ""), status=CheckStatus.SKIP,
+                severity=check.get("severity", "info"),
+                notes="Database connection not available"
+            )
+
         all_results = []
         for schema in schemas:
             schema_ctx = {**ctx, "schema": schema}
             sql = self._substitute(check.get("sql", ""), schema_ctx)
-
-            if not self.connector:
-                continue
 
             result = self.connector.execute(sql)
             if result.success:
@@ -287,6 +292,30 @@ class CheckExecutor:
                     missing_items=missing,
                     remediation=check.get("remediation", ""),
                 )
+            return CheckResult(
+                check_id=check["id"], description=check.get("description", ""),
+                category=check.get("category", ""), status=CheckStatus.PASS,
+                severity=check.get("severity", "info"),
+                actual_value=f"All {len(schemas)} schemas found",
+            )
+
+        # empty_result: PASS when no rows returned (e.g. no unsupported datatypes)
+        if expected == "empty_result":
+            has_data = [r for r in all_results if r["data"]]
+            if has_data:
+                return CheckResult(
+                    check_id=check["id"], description=check.get("description", ""),
+                    category=check.get("category", ""), status=CheckStatus.FAIL,
+                    severity=check.get("severity", "warning"),
+                    actual_value=has_data,
+                    remediation=check.get("remediation", ""),
+                )
+            return CheckResult(
+                check_id=check["id"], description=check.get("description", ""),
+                category=check.get("category", ""), status=CheckStatus.PASS,
+                severity=check.get("severity", "info"),
+                actual_value="No issues found",
+            )
 
         return CheckResult(
             check_id=check["id"], description=check.get("description", ""),

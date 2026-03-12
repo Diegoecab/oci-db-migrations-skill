@@ -29,8 +29,8 @@ oci-db-migrations-cli/
 └── operations/                   # Migration execution pipeline
     ├── base.py                   # Idempotent operation pattern
     ├── pipeline.py               # Orchestrator (run_all, run_step, run_from)
-    ├── op_01_vault_secrets.py    # OCI Vault credential management
-    ├── op_02_network_nsg.py      # NSG with migration rules
+    ├── op_01_vault_secrets.py    # Verify pre-created vault secrets (read-only)
+    ├── op_02_network_nsg.py      # Verify existing NSG (read-only)
     ├── op_03_dms_connections.py  # DMS source + target connections
     ├── op_04_dms_migration.py    # Create + validate + start migrations
     └── op_05_goldengate.py       # GG deployment + reverse replication
@@ -69,8 +69,8 @@ python migrate.py assess --remediate --source aws_oracle_prod
 → Interactive: confirms each SQL statement before executing
 
 # 5. Deploy infrastructure
-python migrate.py deploy --step 1    # Vault secrets
-python migrate.py deploy --step 2    # NSG
+python migrate.py deploy --step 1    # Verify vault secrets
+python migrate.py deploy --step 2    # Verify NSG
 python migrate.py deploy --from 3    # DMS + GG from step 3
 
 # 6. Monitor and advise
@@ -106,12 +106,24 @@ Format example:
 
 Only proceed after the user approves. Never chain multiple commands with `||` or `;` — run one clean command at a time.
 
-**Resource visibility**: Before any deploy step that creates resources, present a **detailed summary** of what will be created, including: resource name, type, compartment, region, and key attributes (user, host, etc.). Give the user full visibility. Example:
+**Interactive decision points**: When running in agentic mode (AI coding tools with terminal access), **always use the tool's interactive question/selection mechanism** (e.g., AskUserQuestion in Claude Code) to present choices with arrow-key navigation. Never present options as plain text for the user to type. This applies to:
+- Proceeding with next steps (deploy, assess, remediate, etc.)
+- Choosing between alternatives (skip vs execute, single step vs batch)
+- Any decision point in the migration workflow
 
+Keep options to 2-4 choices with concise labels and a short description for each. Always include a "View details" or "Pause" option when relevant.
+
+**Resource visibility**: Before any deploy step that creates resources, present a **detailed summary** of what will be created, including: resource name, type, compartment, region, and key attributes (user, host, etc.). For verification-only steps (Vault Secrets, NSG), show what will be verified. Give the user full visibility. Example:
+
+> **Resources to be verified (read-only):**
+> | Resource | Name | Compartment | Check |
+> |----------|------|-------------|-------|
+> | Vault Secret | `dms-src-basedb_pdb1-password` | EC2toADB | Exists and ACTIVE in DMSVault |
+> | NSG | `dms-migration-nsg` | EC2toADB | Exists and AVAILABLE in VCN |
+>
 > **Resources to be created:**
 > | Resource | Name | Compartment | Region | Details |
 > |----------|------|-------------|--------|---------|
-> | Vault Secret | `dms-src-basedb_pdb1-password` | EC2toADB | us-ashburn-1 | Password for user DATAPUMP_EXP in vault DMSVault |
 > | DMS Connection | `dms-src-basedb_pdb1` | EC2toADB | us-ashburn-1 | Oracle DB at 10.0.1.48:1521, user DATAPUMP_EXP, subnet sb1, NSG nsg1 |
 > | DMS Connection | `dms-tgt-adb_target` | EC2toADB | us-ashburn-1 | ADB QO72GKR409DH96WT, user ADMIN, subnet sb1 |
 
@@ -136,8 +148,8 @@ Format:
 | Pre-flight | 6 | Target ADB Assessment | ✅ AVAILABLE, private endpoint |
 | Pre-flight | 7 | OCI Infra Assessment | ✅ Bucket + Vault + Key OK |
 | Pre-flight | 8 | Remediation | ⬚ Pending (needs source DB access) |
-| Deploy | 9 | Vault Secrets | ✅ Created 4 secrets |
-| Deploy | 10 | Network NSG | ✅ Using existing nsg1 |
+| Deploy | 9 | Vault Secrets (verify) | ✅ 4 secrets verified in vault |
+| Deploy | 10 | Network NSG (verify) | ✅ NSG nsg1 verified (AVAILABLE) |
 | Deploy | 11 | DMS Connections | ⏳ Running... |
 | Deploy | 12 | DMS Migrations | ⬚ Pending |
 | Deploy | 13 | GoldenGate | ⬜ Skipped (no reverse replication) |
@@ -163,9 +175,59 @@ Also show this map when the user asks for status or progress at any point.
 The tool handles: connectivity, authentication, error handling, OCI API calls, SQL execution.
 You handle: interpretation, decision logic, sequencing, troubleshooting, and user guidance.
 
+## Migration Journal — Team Collaboration & Audit Log
+
+The migration journal is a shared, append-only log that tracks every action, decision, and pipeline state across sessions and team members. It enables any team member (or AI session) to pick up a migration exactly where someone else left off.
+
+### Architecture
+
+```
+migration-journal-config.json    ← Tracked in git. Contains ONLY the path to the journal.
+         │
+         ▼
+migration-journal.json           ← NOT in git. The actual journal. Can live on:
+                                    - Local path (./migration-journal.json)
+                                    - NFS mount (/mnt/shared/migrations/journal.json)
+                                    - Any shared filesystem
+```
+
+### Journal Structure
+
+```json
+{
+  "_version": "1.0.0",
+  "project":        { "name", "description", "created_at", "region" },
+  "team":           [{ "os_user", "hostname", "role", "added_at", "notes" }],
+  "pipeline_state": { "steps": [{ "phase", "step", "operation", "status", "result" }] },
+  "entries":        [{ "id", "timestamp", "user", "action", "phase", "description", "details", "result" }],
+  "decisions":      [{ "id", "timestamp", "user", "decision", "reason", "impact" }]
+}
+```
+
+### Skill Behavior
+
+1. **Session start**: Read `migration-journal-config.json` to locate the journal. If the journal file doesn't exist at the configured path, ask the user where they want to store it (local, NFS, custom path).
+2. **Auto-detect user**: Get `os_user` via `whoami` and hostname via `/etc/hostname` or `$HOSTNAME`. Format as `user@hostname`. Never ask the user for this.
+3. **New team member**: If the current `user@hostname` is not in the `team` array, add them automatically and note the timestamp.
+4. **After every significant action**: Append an entry with ISO 8601 timestamp, user, action type, description, and result. Significant actions include: discovery, config changes, probe, validate, assess, remediate, deploy steps, status checks, errors, and decisions.
+5. **Pipeline state**: Update `pipeline_state.steps` after each step completes. Update `_last_updated` and `_updated_by`.
+6. **Decisions**: When a non-trivial choice is made (migration type, reverse replication, skip a step, use IP vs FQDN, etc.), record it in `decisions` with the reasoning.
+7. **Resuming**: When a session starts with an existing journal, read the pipeline state and last entries to understand context. Present the progress map derived from the journal, and suggest the next logical action.
+
+### Action Types for Entries
+
+`project_init`, `discovery`, `config_generated`, `config_updated`, `probe`, `validate_config`, `assess`, `remediate`, `deploy_step`, `deploy_complete`, `status_check`, `error`, `decision`, `cutover`, `rollback`, `note`
+
+### Best Practices
+
+- The journal is append-only — never delete entries, only add corrections
+- Keep descriptions concise but actionable — a new team member should understand what happened
+- Record errors and how they were resolved, not just successes
+- When the journal gets large (>100 entries), the skill should focus on the last 20 entries and pipeline_state for context
+
 ## Initial Interaction — OCI Resource Discovery Mode
 
-**This is the FIRST thing you do** when a user starts a migration conversation. Before gathering any other requirements, ask:
+**This is the FIRST thing you do** when a user starts a migration conversation (unless a journal already exists — in that case, resume from the journal state). Before gathering any other requirements, ask:
 
 > How would you like to provide OCI resource information?
 >
@@ -229,7 +291,7 @@ oci network subnet list --compartment-id <compartment_ocid> --vcn-id <vcn_ocid> 
 # Get subnet details (to find its VCN)
 oci network subnet get --subnet-id <subnet_ocid> --query "data.{name:\"display-name\", \"vcn-id\":\"vcn-id\", cidr:\"cidr-block\", \"compartment-id\":\"compartment-id\"}" --output table
 
-# NSGs in a VCN (ask user if they want to use an existing one or create new)
+# NSGs in a VCN (user must select an existing one — the tool does not create NSGs)
 oci network nsg list --compartment-id <compartment_ocid> --vcn-id <vcn_ocid> --query "data[?\"lifecycle-state\"=='AVAILABLE'].{name:\"display-name\", id:id}" --output table
 
 # Vaults in a compartment
@@ -288,7 +350,7 @@ Throughout the migration conversation, **maintain and display a requirements tra
 
 The table MUST include a **Description** column so the user understands what each item is for.
 
-**OCI**: Tenancy OCID, Region, Compartment, VCN, Subnet, NSG (existing OCID or create new), Vault, Key, Bucket, Namespace, CLI Profile
+**OCI**: Tenancy OCID, Region, Compartment, VCN, Subnet, NSG (existing OCID — must be pre-created), Vault, Key, Bucket, Namespace, CLI Profile
 
 **Source**:
 - Host:Port/Service — connection string for the source database
@@ -388,9 +450,8 @@ python migrate.py diagnose "ORA-01031"             # KB error lookup
 Key sections and their purpose:
 
 - **oci**: Tenancy, compartment, region, OCI config profile
-- **networking**: VCN, subnet, NSG config. Two modes:
-  - `nsg_ocid`: use an existing NSG (skip creation). Discovery should list available NSGs and let the user pick.
-  - `create_nsg: true` + `nsg_rules`: create a new NSG with specified port rules. Only if the user doesn't have one.
+- **networking**: VCN, subnet, NSG config.
+  - `nsg_ocid`: OCID of the pre-existing NSG to use. The NSG must already exist with the required security rules (Oracle ports 1521/1522, HTTPS 443). Discovery should list available NSGs and let the user pick.
 - **vault**: Vault OCID + encryption key OCID
 - **object_storage**: Bucket for Data Pump staging
 - **source_databases**: Map of source DBs with connection details + assessment user
@@ -503,7 +564,7 @@ DMS connections and other resources use auto-generated names based on the config
 - Source connection: `dms-src-{source_db_key}` (e.g., `dms-src-basedb_pdb1`)
 - Target connection: `dms-tgt-{target_db_key}` (e.g., `dms-tgt-adb_target`)
 - Vault secrets: `dms-src-{key}-password`, `dms-src-{key}-gg-password`, etc.
-- NSG: `dms-migration-nsg` (if creating new)
+- NSG: `dms-migration-nsg` (must be pre-created)
 - Migration: `dms-mig-{migration_key}` (e.g., `dms-mig-testuser_migration`)
 
 **Before generating the config**, present the proposed resource names to the user and ask if they want to customize them. The names derive from the config keys (`source_db_key`, `target_db_key`, `migration_key`), so changing the key changes all related resource names.
@@ -540,6 +601,7 @@ When a user shares assessment output:
 
 ## Scope Boundaries — What the Skill Must NEVER Do
 
+- **The tool only creates/modifies/deletes DMS migrations, DMS connections, and GoldenGate deployments.** All other OCI resources (Vault, secrets, VCN, NSG, buckets, databases) must exist beforehand. Steps 1 (Vault Secrets) and 2 (Network NSG) are verification-only — they confirm pre-existing resources are correctly configured but never create or modify them.
 - **NEVER create, modify, or delete IAM policies or dynamic groups.** IAM governance belongs to the customer's security team. Only inform what's needed and let the user handle it.
 - **NEVER store or log passwords in plaintext** outside of migration-config.json (which the user owns).
 - **NEVER force-delete or overwrite OCI resources** without explicit user confirmation.

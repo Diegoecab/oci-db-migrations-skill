@@ -1,0 +1,5 @@
+{
+  "_comment": "Pointer to the migration journal file. This file IS tracked in git. The journal itself is NOT.",
+  "journal_path": "./migration-journal.json",
+  "journal_path_description": "Path to the migration journal. Can be a local relative path, absolute path, or NFS mount (e.g., /mnt/shared/migrations/migration-journal.json)"
+}

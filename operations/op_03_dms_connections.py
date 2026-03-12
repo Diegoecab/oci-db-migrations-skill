@@ -5,7 +5,7 @@ Creates:
   - Source connection (Oracle DB with private endpoint)
   - Target connection (ADB with private endpoint)
 
-Uses OCI Vault secrets for credentials (created in step 01).
+Uses OCI Vault secrets for credentials (verified in step 01).
 
 Compatible with both old and new OCI SDK versions:
   - New SDK (>=2.120): CreateOracleConnectionDetails with technology_type, connection_string

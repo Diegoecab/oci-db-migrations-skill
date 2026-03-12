@@ -1,9 +1,13 @@
 """
-Operation 02: Create Network Security Group with migration rules.
+Operation 02: Verify pre-existing Network Security Group for migration.
 
-Creates NSG in the target VCN with ingress/egress rules for:
-  - Oracle DB ports (1521, 1522) from source CIDR
-  - HTTPS (443) for GoldenGate REST API
+Verifies that the NSG exists and is AVAILABLE. Checks that the NSG has
+security rules configured (ingress for Oracle ports and HTTPS).
+
+READ-ONLY: This operation never creates NSGs or adds security rules.
+The NSG must be pre-created with the required rules before running
+the pipeline. If the NSG doesn't exist, the operation fails with a
+clear error message.
 """
 
 import logging
@@ -16,14 +20,12 @@ logger = logging.getLogger(__name__)
 
 class NetworkNSGOperation(BaseOperation):
 
-    NSG_DISPLAY_NAME = "dms-migration-nsg"
-
     @property
     def name(self) -> str:
         return "network-nsg"
 
     def check_exists(self, **kwargs) -> Optional[str]:
-        """Check if NSG already exists — either from config (nsg_ocid) or by name in VCN."""
+        """Check if NSG exists — from config (nsg_ocid) or by name in VCN."""
         # If user provided an existing NSG OCID, use it directly
         nsg_ocid = self.config.networking.get("nsg_ocid")
         if nsg_ocid:
@@ -36,7 +38,7 @@ class NetworkNSGOperation(BaseOperation):
                 logger.warning(f"Configured nsg_ocid not found or not available: {e}")
                 return None
 
-        # Otherwise, check if we previously created one by name
+        # Otherwise, check if one exists by the conventional name
         try:
             compartment = self.config.oci["compartment_ocid"]
             vcn_ocid = self.config.networking["vcn_ocid"]
@@ -47,7 +49,7 @@ class NetworkNSGOperation(BaseOperation):
             ).data
 
             for nsg in nsgs:
-                if nsg.display_name == self.NSG_DISPLAY_NAME and nsg.lifecycle_state == "AVAILABLE":
+                if nsg.display_name == "dms-migration-nsg" and nsg.lifecycle_state == "AVAILABLE":
                     return nsg.id
 
             return None
@@ -56,99 +58,84 @@ class NetworkNSGOperation(BaseOperation):
             return None
 
     def execute(self, **kwargs) -> OpResult:
-        """Create NSG with migration rules. Skipped if nsg_ocid is set in config."""
-        # If user provided an existing NSG, skip creation entirely
+        """Verify NSG exists and has security rules. Never creates NSGs or rules.
+
+        This operation is read-only. If the NSG doesn't exist or is not
+        configured in migration-config.json, it fails with a clear message.
+        """
         nsg_ocid = self.config.networking.get("nsg_ocid")
-        if nsg_ocid:
+
+        if not nsg_ocid:
             return OpResult(
                 operation=self.name, resource_type="nsg",
-                resource_id=nsg_ocid, status=OpStatus.EXISTS,
-                message=f"Using existing NSG from config: {nsg_ocid}",
-            )
-        """Create NSG with migration rules."""
-        import oci
-
-        compartment = self.config.oci["compartment_ocid"]
-        vcn_ocid = self.config.networking["vcn_ocid"]
-        nsg_rules = self.config.networking.get("nsg_rules", {})
-        source_cidr = nsg_rules.get("source_cidr", "10.0.0.0/16")
-        oracle_ports = nsg_rules.get("oracle_ports", [1521, 1522])
-        https_port = nsg_rules.get("https_port", 443)
-
-        # Create NSG
-        nsg_details = oci.core.models.CreateNetworkSecurityGroupDetails(
-            compartment_id=compartment,
-            vcn_id=vcn_ocid,
-            display_name=self.NSG_DISPLAY_NAME,
-        )
-
-        nsg = self.oci.virtual_network.create_network_security_group(nsg_details).data
-        nsg_id = nsg.id
-        logger.info(f"  Created NSG: {nsg_id}")
-
-        # Wait for AVAILABLE
-        if not self.wait_for_state(
-            self.oci.virtual_network.get_network_security_group,
-            nsg_id, "AVAILABLE", max_wait=120
-        ):
-            return OpResult(
-                operation=self.name, resource_type="nsg",
-                resource_id=nsg_id, status=OpStatus.FAILED,
-                error="NSG did not reach AVAILABLE state",
-            )
-
-        # Add security rules
-        rules = []
-
-        # Ingress rules for Oracle ports
-        for port in oracle_ports:
-            rules.append(oci.core.models.AddSecurityRuleDetails(
-                direction="INGRESS",
-                protocol="6",  # TCP
-                source=source_cidr,
-                source_type="CIDR_BLOCK",
-                tcp_options=oci.core.models.TcpOptions(
-                    destination_port_range=oci.core.models.PortRange(
-                        min=port, max=port
-                    )
+                status=OpStatus.FAILED,
+                error=(
+                    "No NSG OCID configured. This tool does NOT create NSGs — "
+                    "they must be pre-created before running the pipeline.\n"
+                    "Steps to fix:\n"
+                    "  1. Create an NSG in your VCN with ingress rules for:\n"
+                    "     - Oracle DB ports (1521, 1522) from your source CIDR\n"
+                    "     - HTTPS (443) for GoldenGate REST API\n"
+                    "     - Egress to source CIDR\n"
+                    "  2. Add the NSG OCID to migration-config.json under "
+                    "networking.nsg_ocid\n"
+                    "  3. Re-run this step."
                 ),
-                description=f"Oracle DB port {port} from source",
-            ))
+            )
 
-        # Ingress HTTPS for GoldenGate
-        rules.append(oci.core.models.AddSecurityRuleDetails(
-            direction="INGRESS",
-            protocol="6",
-            source=source_cidr,
-            source_type="CIDR_BLOCK",
-            tcp_options=oci.core.models.TcpOptions(
-                destination_port_range=oci.core.models.PortRange(
-                    min=https_port, max=https_port
+        # Verify NSG exists and is AVAILABLE
+        try:
+            nsg = self.oci.virtual_network.get_network_security_group(nsg_ocid).data
+        except Exception as e:
+            return OpResult(
+                operation=self.name, resource_type="nsg",
+                status=OpStatus.FAILED,
+                error=(
+                    f"Cannot access NSG {nsg_ocid}: {e}\n"
+                    f"Ensure the NSG exists and you have permissions to read it."
+                ),
+            )
+
+        if nsg.lifecycle_state != "AVAILABLE":
+            return OpResult(
+                operation=self.name, resource_type="nsg",
+                resource_id=nsg_ocid, status=OpStatus.FAILED,
+                error=(
+                    f"NSG {nsg.display_name} ({nsg_ocid}) is in state "
+                    f"'{nsg.lifecycle_state}', expected 'AVAILABLE'."
+                ),
+            )
+
+        # Verify NSG has security rules
+        rules_info = []
+        try:
+            rules = self.oci.virtual_network.list_network_security_group_security_rules(
+                nsg_ocid
+            ).data
+            ingress_rules = [r for r in rules if r.direction == "INGRESS"]
+            egress_rules = [r for r in rules if r.direction == "EGRESS"]
+            rules_info = {
+                "total_rules": len(rules),
+                "ingress_rules": len(ingress_rules),
+                "egress_rules": len(egress_rules),
+            }
+            logger.info(
+                f"  NSG {nsg.display_name}: {len(ingress_rules)} ingress, "
+                f"{len(egress_rules)} egress rules"
+            )
+
+            if len(rules) == 0:
+                logger.warning(
+                    f"  WARNING: NSG {nsg.display_name} has no security rules. "
+                    f"DMS connections may fail without proper ingress/egress rules."
                 )
-            ),
-            description="HTTPS for GoldenGate REST API",
-        ))
-
-        # Egress: allow all within VCN
-        rules.append(oci.core.models.AddSecurityRuleDetails(
-            direction="EGRESS",
-            protocol="all",
-            destination=source_cidr,
-            destination_type="CIDR_BLOCK",
-            description="Allow all egress to source CIDR",
-        ))
-
-        self.oci.virtual_network.add_network_security_group_security_rules(
-            nsg_id,
-            oci.core.models.AddNetworkSecurityGroupSecurityRulesDetails(
-                security_rules=rules
-            ),
-        )
-        logger.info(f"  Added {len(rules)} security rules")
+        except Exception as e:
+            logger.warning(f"  Could not list NSG rules (non-fatal): {e}")
+            rules_info = {"note": "Could not verify rules, proceeding anyway"}
 
         return OpResult(
             operation=self.name, resource_type="nsg",
-            resource_id=nsg_id, status=OpStatus.CREATED,
-            message=f"NSG created with {len(rules)} rules",
-            details={"nsg_id": nsg_id, "rules_count": len(rules)},
+            resource_id=nsg_ocid, status=OpStatus.SUCCESS,
+            message=f"NSG verified: {nsg.display_name} (AVAILABLE)",
+            details={"nsg_id": nsg_ocid, "display_name": nsg.display_name, "rules": rules_info},
         )
