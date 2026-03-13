@@ -677,6 +677,10 @@ If the skill detects a command outside its scope, it blocks it with an explanati
 - [OCI GoldenGate](https://docs.oracle.com/en-us/iaas/goldengate/doc/overview-goldengate.html)
 - [OCI GoldenGate IAM Policies](https://docs.oracle.com/en-us/iaas/goldengate/doc/policies.html)
 
+## Disclaimer
+
+This is **not** an official Oracle product. This project is an independent, community-driven tool and is not affiliated with, endorsed by, or supported by Oracle Corporation. Oracle, OCI, Oracle Database, Oracle GoldenGate, and all related names and logos are trademarks or registered trademarks of Oracle Corporation and/or its affiliates. All rights reserved.
+
 ## License
 
 MIT
