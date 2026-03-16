@@ -349,7 +349,7 @@ After the user chooses:
 When adding a migration to an existing project:
 
 1. **Reuse existing infrastructure**: The current config already has compartment, VCN, subnet, vault, key, bucket, and target ADB. Confirm with the user whether the new migration uses the same target ADB or a different one.
-2. **Gather new source details**: Ask for the new source DB connection info (type, host, port, service, schemas). If the source is the same host but a different PDB or schema set, reuse the existing source entry and only add a new migration block.
+2. **Gather new source details**: Ask for the new source DB connection info (type, IP, hostname/FQDN, port, CDB service, PDB service, migration scope). If the source is the same host but a different PDB or schema set, reuse the existing source entry and only add a new migration block.
 3. **Gather migration details**: Schema list, migration type (ONLINE/OFFLINE), reverse replication (yes/no).
 4. **Update config**: Add the new source (if needed) and new migration entry to `migration-config.json`. Use the same naming convention as existing entries.
 5. **Validate**: Run `validate-config` to confirm the updated config is valid.
@@ -372,7 +372,7 @@ If **no journal exists** (fresh start), first ask what the user wants to do:
 
 After the user chooses:
 - **Option A**: proceed to ask discovery mode (auto-discover vs manual OCIDs) and then the full pipeline.
-- **Option B**: ask for source DB details (type, host, service, schemas) and target ADB OCID, then generate assessment + remediation SQL scripts for manual execution. No deploy steps.
+- **Option B**: ask for source DB details (type, IP, hostname/FQDN, port, services, migration scope) and target ADB OCID, then generate assessment + remediation SQL scripts for manual execution. No deploy steps.
 - **Option C**: same as B but additionally execute the fixes interactively (`assess --remediate`).
 
 Then, if Option A was chosen, ask how to provide OCI resource information:
@@ -464,11 +464,18 @@ For prerequisite checks, consult `kb/prerequisites.yaml` directly. For error pat
 
 ### Config Generation
 When a user describes their migration scenario, generate a complete `migration-config.json`:
-1. Ask for: source DB type, host/port/service, schemas, target ADB OCID, OCI compartment
-2. Set `db_type` correctly (affects assessment variant behavior)
-3. Set `enable_reverse_replication` based on criticality
-4. Include `assessment_user` (recommend DBSNMP with SELECT_CATALOG_ROLE)
-5. **For OCI Base DB in the same VCN**: use the **private IP address** (not the FQDN hostname). DMS may not resolve internal OCI FQDNs.
+1. Ask for source DB details. **Always ask for both IP and hostname (FQDN)** — DMS connections require the hostname. For each source, collect:
+   - DB type (`oracle_onprem`, `oracle_rds`, `oracle_exacs`, `oracle_exacc`)
+   - IP address (`host` in config)
+   - Hostname / FQDN (`hostname` in config) — DMS needs this for connection creation
+   - Port (default 1521)
+   - CDB service name (if multitenant)
+   - PDB service name
+   - **For OCI Base DB in the same VCN**: use the **private IP address** (not the FQDN hostname) as `host`. DMS may not resolve internal OCI FQDNs.
+2. Ask for migration scope: **SCHEMA** (specific schemas → ask which ones) or **FULL** (entire database, no schema list needed). When the user says "full" or "toda la base", use `migration_scope: "FULL"` with no `include_allow_objects`.
+3. Set `db_type` correctly (affects assessment variant behavior)
+4. Set `enable_reverse_replication` based on criticality
+5. Include `assessment_user` (recommend DBSNMP with SELECT_CATALOG_ROLE)
 6. Present proposed resource names to the user before generating. See [CONFIG-SCHEMA.md](CONFIG-SCHEMA.md) for naming convention.
 7. Output valid JSON ready to save
 

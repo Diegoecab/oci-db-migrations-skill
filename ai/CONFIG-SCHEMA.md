@@ -9,11 +9,14 @@
 - **object_storage**: Bucket for Data Pump staging
 - **source_databases**: Map of source DBs with connection details + assessment user
   - `db_type`: oracle_onprem | oracle_rds | oracle_exacs | oracle_exacc
+  - `host`: IP address (used for connectivity)
+  - `hostname`: FQDN (required by DMS connections — always ask for both IP and hostname)
   - `assessment_user/password`: Read-only user for pre-migration checks (e.g., DBSNMP)
 - **target_databases**: Map of target ADBs with OCID + credentials
 - **migrations**: Map of migration definitions
   - `migration_type`: ONLINE (with GG CDC) or OFFLINE (Data Pump only)
-  - `include_allow_objects`: ["SCHEMA.*"] or ["SCHEMA.TABLE"]
+  - `migration_scope`: SCHEMA (specific schemas) or FULL (entire database)
+  - `include_allow_objects`: ["SCHEMA.*"] or ["SCHEMA.TABLE"] — only when `migration_scope` is SCHEMA. Omit or leave empty for FULL.
   - `enable_reverse_replication`: true → provisions GG fallback
   - `auto_validate` / `auto_start`: post-creation automation
 - **goldengate**: GG deployment config (only needed if any migration has reverse replication)
