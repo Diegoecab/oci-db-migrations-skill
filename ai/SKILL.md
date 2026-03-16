@@ -247,7 +247,7 @@ When the source or target is **non-ADB** and SSH details were **not provided** i
 2. Unzip the certificate files to a directory on the database host file system
 3. Provide this directory path as **SSL Wallet Path** when creating the DMS migration
 
-**Automated solution**: `python migrate.py generate-wallet-script --source <key>` generates a shell script that:
+**Automated solution**: `python migrate.py generate-wallet-script` generates a shell script that:
 - Downloads the `walletSSL.zip` from Oracle's published URL
 - Unzips into the **Data Pump directory** (`datapump_dir_path`) — the wallet lives alongside Data Pump files, no separate Oracle directory object is needed
 - Verifies the certificate files exist (`cwallet.sso`, etc.)
@@ -469,8 +469,11 @@ python migrate.py deploy --step 3                  # Run specific step
 python migrate.py deploy --from-step 3             # Run from step 3 onward
 python migrate.py deploy --list-steps              # Show available steps
 
-# Wallet setup
-python migrate.py generate-wallet-script           # Generate SSL wallet setup script for source DB
+# Wallet setup (from config)
+python migrate.py generate-wallet-script                          # Uses config for datapump path
+python migrate.py generate-wallet-script --source X               # Specific source from config
+# Wallet setup (standalone — no config needed)
+python migrate.py generate-wallet-script --datapump-dir /path --region us-ashburn-1 --source my_db
 
 # Diagnostics
 python migrate.py probe                            # Check available tools

@@ -570,29 +570,43 @@ def cmd_start_migration(args):
 
 def cmd_generate_wallet_script(args):
     """Generate shell script to create SSL wallet on source DB server."""
-    config = MigrationConfig(args.config)
-    if not config.load():
-        print("❌ Configuration errors:")
-        for e in config.errors:
-            print(f"  • {e}")
-        sys.exit(1)
+    # Standalone mode: --datapump-dir provided, no config needed
+    datapump_dir_override = getattr(args, 'datapump_dir', None)
+    region_override = getattr(args, 'region', None)
 
-    source_key = args.source or list(config.source_databases.keys())[0]
-    src = config.source_db(source_key)
-    if not src:
-        print(f"❌ Source '{source_key}' not found")
-        sys.exit(1)
+    if datapump_dir_override:
+        source_key = args.source or "standalone"
+        src = {}
+        dp_dir_path = datapump_dir_override
+        region = region_override or "us-ashburn-1"
+        username = "DMS_USER"
+        gg_username = "GGADMIN"
+    else:
+        config = MigrationConfig(args.config)
+        if not config.load():
+            print("❌ Configuration errors:")
+            for e in config.errors:
+                print(f"  • {e}")
+            sys.exit(1)
 
-    region = config.oci.get("region", "us-ashburn-1")
-    dp_dir_name = src.get("datapump_dir_name", "DATA_PUMP_DIR")
-    dp_dir_path = src.get("datapump_dir_path", "")
-    if not dp_dir_path:
-        print(f"❌ Source '{source_key}' has no datapump_dir_path configured.")
-        sys.exit(1)
+        source_key = args.source or list(config.source_databases.keys())[0]
+        src = config.source_db(source_key)
+        if not src:
+            print(f"❌ Source '{source_key}' not found")
+            sys.exit(1)
+
+        region = region_override or config.oci.get("region", "us-ashburn-1")
+        dp_dir_path = datapump_dir_override or src.get("datapump_dir_path", "")
+        if not dp_dir_path:
+            print(f"❌ Source '{source_key}' has no datapump_dir_path configured.")
+            print("  Tip: use --datapump-dir <path> to provide it directly.")
+            sys.exit(1)
+        username = src.get("username", "DMS_USER")
+        gg_username = src.get("gg_username", "GGADMIN")
+
+    dp_dir_name = src.get("datapump_dir_name", "DATA_PUMP_DIR") if src else "DATA_PUMP_DIR"
     # SSL wallet files go inside the Data Pump directory — no separate directory needed
     wallet_dir = dp_dir_path
-    username = src.get("username", "DMS_USER")
-    gg_username = src.get("gg_username", "GGADMIN")
 
     output_path = args.output or os.path.join("scripts", f"setup-ssl-wallet_{source_key}.sh")
 
@@ -891,6 +905,10 @@ def main():
     wallet_parser = subparsers.add_parser("generate-wallet-script",
                                            help="Generate SSL wallet setup script for source DB server")
     wallet_parser.add_argument("--source", help="Source DB key (default: first source)")
+    wallet_parser.add_argument("--datapump-dir", default=None,
+                               help="Data Pump directory path (overrides config, allows use without config)")
+    wallet_parser.add_argument("--region", default=None,
+                               help="OCI region (overrides config, e.g. us-ashburn-1)")
     wallet_parser.add_argument("--output", default=None,
                                help="Output script path (default: scripts/setup-ssl-wallet_<source>.sh)")
 

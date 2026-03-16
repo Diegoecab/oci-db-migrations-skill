@@ -561,6 +561,7 @@ After running `setup.sh`, use `./migrate` (or `python3.x migrate.py` directly):
 | `./migrate diagnose "ORA-XXXXX"` | KB error lookup |
 | `./migrate generate-wallet-script` | Generate SSL wallet setup script for source DB |
 | `./migrate generate-wallet-script --source X` | Generate for specific source |
+| `./migrate generate-wallet-script --datapump-dir /path --region us-ashburn-1` | Standalone mode (no config needed) |
 
 ---
 
