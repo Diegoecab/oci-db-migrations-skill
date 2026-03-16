@@ -490,6 +490,172 @@ export DMS_PASSWORD_ADB_TARGET="admin_secret"
 | `oracle_exacs` | Uses `dbaascli` for some operations |
 | `oracle_exacc` | Customer-managed Exadata. Same as on-prem |
 
+### Database Users and Privileges
+
+DMS migrations require specific database users with minimum privileges on both source and target. The privileges below are based on Oracle's official `dms-db-prep-v2.sh` script (MOS Doc ID 2953866.1).
+
+#### Users Overview
+
+| User | Where | Purpose | Required for |
+|------|-------|---------|-------------|
+| **Replication user** (GGADMIN) | Source PDB | GoldenGate capture + apply | Online migrations (MUST be named `GGADMIN`) |
+| **CDB replication user** (C##GGADMIN) | Source CDB | CDB-level GoldenGate operations | Online + multitenant source |
+| **Initial load user** | Source PDB | Data Pump export | All migrations (online + offline) |
+| **GGADMIN** | Target ADB | GoldenGate apply on target | Online migrations |
+| **ADMIN** | Target ADB | Data Pump import, schema setup | All migrations |
+
+> **Important**: For online migrations, the replication user **must** be named `GGADMIN`. DMS and GoldenGate expect this specific username. This is not configurable.
+
+#### Source — Replication User (GGADMIN in PDB / non-CDB)
+
+The replication user handles GoldenGate capture, Data Pump export, and DDL replication. These are the minimum privileges from Oracle's script:
+
+```sql
+-- System privileges
+CREATE SESSION
+ALTER SYSTEM
+ALTER USER
+SELECT ANY DICTIONARY
+SELECT ANY TRANSACTION
+DATAPUMP_EXP_FULL_DATABASE
+DATAPUMP_IMP_FULL_DATABASE
+
+-- Data Pump directory access
+READ ON DIRECTORY DATA_PUMP_DIR
+WRITE ON DIRECTORY DATA_PUMP_DIR
+
+-- DML replication
+INSERT ANY TABLE
+UPDATE ANY TABLE
+DELETE ANY TABLE
+LOCK ANY TABLE
+DROP ANY TABLE
+DROP ANY INDEX
+DROP ANY VIEW
+DROP ANY PROCEDURE
+
+-- V$ views
+SELECT ON V_$SESSION
+SELECT ON V_$TRANSACTION
+SELECT ON V_$DATABASE
+
+-- DDL replication (checkpoint, heartbeat tables)
+CREATE ANY TABLE
+CREATE ANY INDEX
+CREATE ANY CLUSTER
+CREATE ANY INDEXTYPE
+CREATE ANY OPERATOR
+CREATE ANY PROCEDURE
+CREATE ANY SEQUENCE
+CREATE ANY TRIGGER
+CREATE ANY TYPE
+CREATE ANY VIEW
+ALTER ANY TABLE
+ALTER ANY INDEX
+ALTER ANY CLUSTER
+ALTER ANY INDEXTYPE
+ALTER ANY OPERATOR
+ALTER ANY PROCEDURE
+ALTER ANY SEQUENCE
+ALTER ANY TRIGGER
+ALTER ANY TYPE
+CREATE DATABASE LINK
+
+-- Data Vault (only if Data Vault is enabled)
+DV_GOLDENGATE_ADMIN
+DV_GOLDENGATE_REDO_ACCESS
+
+-- GoldenGate authorization (grants additional internal privileges)
+EXEC DBMS_GOLDENGATE_AUTH.GRANT_ADMIN_PRIVILEGE('GGADMIN', CONTAINER=>'CURRENT');
+```
+
+#### Source — CDB Replication User (C##GGADMIN) — Multitenant only
+
+Required only when source is CDB+PDB:
+
+```sql
+CREATE SESSION
+CREATE VIEW
+CREATE TABLE
+ALTER SYSTEM
+SELECT ANY DICTIONARY
+DV_GOLDENGATE_ADMIN          -- only if Data Vault enabled
+DV_GOLDENGATE_REDO_ACCESS    -- only if Data Vault enabled
+
+-- GoldenGate authorization at CDB level
+EXEC DBMS_GOLDENGATE_AUTH.GRANT_ADMIN_PRIVILEGE('C##GGADMIN', CONTAINER=>'ALL');
+```
+
+All grants use `CONTAINER=ALL`.
+
+#### Source — Initial Load User (when different from GGADMIN)
+
+If you use a separate user for Data Pump (e.g., `SYSTEM`), it needs:
+
+```sql
+CREATE SESSION
+DATAPUMP_EXP_FULL_DATABASE
+DATAPUMP_IMP_FULL_DATABASE
+SELECT ANY DICTIONARY
+EXECUTE ON UTL_HTTP
+```
+
+> If GGADMIN is also the initial load user (recommended), these privileges are already included in the replication user grants above.
+
+#### Source — RDS Variant
+
+On RDS, you cannot grant privileges directly. Use `rdsadmin` procedures:
+
+```sql
+-- GoldenGate authorization
+EXEC RDSADMIN.RDSADMIN_DBMS_GOLDENGATE_AUTH.GRANT_ADMIN_PRIVILEGE(
+    GRANTEE=>'GGADMIN', PRIVILEGE_TYPE=>'CAPTURE',
+    GRANT_SELECT_PRIVILEGES=>TRUE, DO_GRANTS=>TRUE);
+
+-- Additional system table grants (via rdsadmin)
+EXEC RDSADMIN.RDSADMIN_UTIL.GRANT_SYS_OBJECT('CDEF$', 'GGADMIN');
+EXEC RDSADMIN.RDSADMIN_UTIL.GRANT_SYS_OBJECT('COL$', 'GGADMIN');
+EXEC RDSADMIN.RDSADMIN_UTIL.GRANT_SYS_OBJECT('CON$', 'GGADMIN');
+EXEC RDSADMIN.RDSADMIN_UTIL.GRANT_SYS_OBJECT('OBJ$', 'GGADMIN');
+EXEC RDSADMIN.RDSADMIN_UTIL.GRANT_SYS_OBJECT('SEG$', 'GGADMIN');
+EXEC RDSADMIN.RDSADMIN_UTIL.GRANT_SYS_OBJECT('TAB$', 'GGADMIN');
+```
+
+Plus: `UNLIMITED TABLESPACE`, `SELECT ANY DICTIONARY`, `CREATE VIEW`.
+
+#### Source — GGADMIN (when NOT the replication user)
+
+If a different user is the replication user (non-standard), GGADMIN still needs minimum privileges for the switchover phase:
+
+```sql
+SELECT ANY DICTIONARY
+SELECT ANY TRANSACTION
+SELECT ON V_$SESSION
+SELECT ON V_$TRANSACTION
+SELECT ON V_$DATABASE
+```
+
+#### Target — ADB (Autonomous Database)
+
+On ADB, `GGADMIN` is pre-created but locked by default. Required setup:
+
+```sql
+-- Unlock GGADMIN (required for online migrations)
+ALTER USER GGADMIN IDENTIFIED BY "<password>" ACCOUNT UNLOCK;
+```
+
+`ADMIN` (the default ADB admin user) handles Data Pump import and has all necessary privileges by default. No additional grants needed for `ADMIN`.
+
+For online migrations, DMS uses `GGADMIN` on the target for GoldenGate apply. The ADB pre-grants the necessary GoldenGate privileges to `GGADMIN` — you only need to unlock it and set a password.
+
+#### Target — Non-ADB PDB
+
+If target is a regular PDB (not ADB), the replication user needs the same privileges as the source PDB replication user (see above), plus:
+
+```sql
+GRANT PDB_DBA TO GGADMIN WITH ADMIN OPTION;
+```
+
 ---
 
 ## Database Connectivity
