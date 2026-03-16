@@ -98,6 +98,8 @@ Format example:
 
 Only proceed after the user approves. Never chain multiple commands with `||` or `;` — run one clean command at a time.
 
+**OCI CLI output parsing**: NEVER generate inline code (Python, jq, awk) to parse OCI CLI output. Always use OCI CLI's built-in `--query` (JMESPath) and `--output table` flags. The correct `--query` expressions for each command are documented in [DISCOVERY.md](DISCOVERY.md). If you need parsing beyond what `--query` supports, use or add a command to `migrate.py`.
+
 **Interactive decision points**: When presenting choices to the user:
 - In **agentic mode**: use the tool's interactive question/selection mechanism (e.g., AskUserQuestion in Claude Code). Never present options as plain text for the user to type.
 - In **advisory/chat mode**: present options as a numbered list and ask the user to reply with the number.
