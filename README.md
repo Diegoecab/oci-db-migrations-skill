@@ -174,6 +174,82 @@ The `ai/SKILL.md` file is a system prompt that transforms any capable LLM into a
 
 **Cutover Advisory** — The assistant evaluates replication lag trend, GoldenGate fallback state, source load, and timing to give a go/no-go recommendation with an execution sequence and rollback plan.
 
+### Example: Discovery Flow (Claude Code)
+
+```console
+$ claude
+
+● No migration journal found. Fresh start:
+
+  ╔═══════════════════════════════════════════════════════════════════╗
+  ║              OCI Database Migration AI Skill                      ║
+  ╠═══════════════════════════════════════════════════════════════════╣
+  ║                                                                   ║
+  ║  Your Oracle Database Migration specialist.                       ║
+  ║  Migrate Oracle DBs (on-prem, RDS, ExaCS) to ADB                 ║
+  ║  using DMS and GoldenGate.                                        ║
+  ║                                                                   ║
+  ║  What I can do:                                                   ║
+  ║                                                                   ║
+  ║  PROJECT                                                          ║
+  ║   ▸ New project — Create a migration project from scratch         ║
+  ║   ▸ Discover    — Auto-discover OCI resources via CLI             ║
+  ║                                                                   ║
+  ║  PREPARE DATABASES                                                ║
+  ║   ▸ Assess      — Check source & target DB readiness              ║
+  ║   ▸ Scripts     — Generate SQL scripts (run them yourself)        ║
+  ║   ▸ Remediate   — Execute fixes directly on source/target         ║
+  ║                                                                   ║
+  ║  DEPLOY & OPERATE (optional — you can use the OCI Console too)    ║
+  ║   ▸ Deploy      — DMS connections, migrations, GoldenGate         ║
+  ║   ▸ Monitor     — Track progress and troubleshoot errors          ║
+  ║   ▸ Clean up    — Remove resources when needed                    ║
+  ║                                                                   ║
+  ╚═══════════════════════════════════════════════════════════════════╝
+
+● What would you like to do?  →  Discover
+
+● What OCI CLI profile should I use?  →  DEFAULT
+  What region are your resources in?   →  us-ashburn-1
+
+  To discover your resources, I'll run the following read-only commands:
+  - oci iam region-subscription list — verify authentication
+  - oci iam compartment list — list compartments
+  - oci database-migration migration list — existing DMS migrations
+  - oci database-migration connection list — existing DMS connections
+
+● Can I run all these read-only OCI CLI commands without asking each time?  →  Yes
+
+● Authentication OK. Compartment selected: EC2toADB
+
+  DMS Migrations
+
+  ┌───┬───────────────────────────┬────────┬────────┬──────────┐
+  │ # │          Name             │  Type  │ State  │ DB Combo │
+  ├───┼───────────────────────────┼────────┼────────┼──────────┤
+  │ 1 │ TESTUSER - BaseDB to ADB  │ ONLINE │ ACTIVE │ Oracle   │
+  │ 2 │ TESTUSER1 - BaseDB to ADB │ ONLINE │ ACTIVE │ Oracle   │
+  │ 3 │ MySQL                     │ ONLINE │ ACTIVE │ MySQL    │
+  └───┴───────────────────────────┴────────┴────────┴──────────┘
+
+  DMS Connections (Oracle)
+
+  ┌──────────────────────────┬────────────┬──────────────────────────┐
+  │          Name            │    Type    │       Host / Service     │
+  ├──────────────────────────┼────────────┼──────────────────────────┤
+  │ dms-src-basedb_pdb1      │ Source PDB │ 10.0.1.48 / EC2_EC2_PDB1│
+  │ dms-src-basedb_cdb       │ Source CDB │ 10.0.1.48 / EC2_DB      │
+  │ dms-tgt-adb_target       │ Target ADB │ Autonomous DB           │
+  └──────────────────────────┴────────────┴──────────────────────────┘
+
+● What would you like to do?
+
+  ❯ 1. Create project from these migrations
+  ❯ 2. Inspect a specific migration
+  ❯ 3. New migration in this compartment
+  ❯ 4. Just exploring
+```
+
 ### Compatibility
 
 The SKILL.md is a standard system prompt — it works with any LLM that supports structured instructions. The skill relies on the model's ability to interpret JSON output, follow multi-step procedures, and reason about Oracle database concepts.
