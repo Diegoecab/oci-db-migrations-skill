@@ -35,6 +35,10 @@ migration-journal.json
 remediation.sql
 remediation-oci.sh
 
+# Generated scripts (per-migration/per-source)
+scripts/*.sql
+scripts/setup-ssl-wallet_*.sh
+
 # Generated
 migrate
 gg-config/

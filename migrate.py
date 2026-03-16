@@ -584,13 +584,17 @@ def cmd_generate_wallet_script(args):
         sys.exit(1)
 
     region = config.oci.get("region", "us-ashburn-1")
-    wallet_dir = src.get("ssl_wallet_dir", "/u01/app/oracle/admin/dpdump")
     dp_dir_name = src.get("datapump_dir_name", "DATA_PUMP_DIR")
-    dp_dir_path = src.get("datapump_dir_path", wallet_dir)
+    dp_dir_path = src.get("datapump_dir_path", "")
+    if not dp_dir_path:
+        print(f"❌ Source '{source_key}' has no datapump_dir_path configured.")
+        sys.exit(1)
+    # SSL wallet files go inside the Data Pump directory — no separate directory needed
+    wallet_dir = dp_dir_path
     username = src.get("username", "DMS_USER")
     gg_username = src.get("gg_username", "GGADMIN")
 
-    output_path = args.output or "setup-ssl-wallet.sh"
+    output_path = args.output or os.path.join("scripts", f"setup-ssl-wallet_{source_key}.sh")
 
     script = f"""#!/bin/bash
 # =============================================================================
@@ -601,82 +605,126 @@ def cmd_generate_wallet_script(args):
 # =============================================================================
 #
 # Run this script ON THE SOURCE DATABASE SERVER as the oracle user.
-# It downloads the OCI Object Storage root CA certificate and creates
-# an Oracle wallet that DMS needs for HTTPS Data Pump uploads.
+#
+# DMS requires an SSL wallet on the database host for HTTPS Data Pump
+# uploads to OCI Object Storage. This script follows Oracle's official
+# procedure from the DMS documentation:
+#   https://docs.oracle.com/en-us/iaas/database-migration/doc/creating-migrations.html
+#
+# Method 1 (preferred): Download Oracle's pre-created walletSSL.zip
+# Method 2 (fallback):  Create wallet manually with orapki + CA certificate
 #
 # Prerequisites:
-#   - orapki must be in PATH (comes with Oracle DB installation)
-#   - Internet/proxy access to objectstorage.{region}.oraclecloud.com
+#   - curl or wget for downloading walletSSL.zip
+#   - unzip utility
 #   - Write access to {wallet_dir}
+#   - (Fallback only) orapki in PATH + openssl
 # =============================================================================
 
 set -euo pipefail
 
 WALLET_DIR="{wallet_dir}"
 REGION="{region}"
-CERT_URL="https://objectstorage.${{REGION}}.oraclecloud.com"
-CERT_FILE="/tmp/oci-os-cert.pem"
+WALLET_ZIP="/tmp/walletSSL.zip"
+
+# Oracle's official pre-created SSL wallet download URL
+# Ref: https://docs.oracle.com/en-us/iaas/database-migration/doc/creating-migrations.html
+WALLET_URL="https://objectstorage.us-phoenix-1.oraclecloud.com/p/YYkalHlLbbrfOAMIor-Mzl1qcFxaAZOvrYABKzRQYPErFQdzJrVjma1cUg4SIXEu/n/axsdric7bk0y/b/SSL-Wallet-For-No-SSH-Migrations-Setup/o/walletSSL.zip"
 
 echo "=== Step 1: Create wallet directory ==="
 mkdir -p "$WALLET_DIR"
 echo "  Directory: $WALLET_DIR"
 
 echo ""
-echo "=== Step 2: Download OCI Object Storage root CA certificate ==="
-# Download the certificate chain from the Object Storage endpoint
-openssl s_client -connect objectstorage.${{REGION}}.oraclecloud.com:443 \\
-    -showcerts </dev/null 2>/dev/null | \\
-    awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/{{print}}' | \\
-    awk 'BEGIN{{n=0}} /BEGIN CERTIFICATE/{{n++}} n>0{{print > "/tmp/oci-os-cert-"n".pem"}}'
-
-# Use the root CA (last certificate in the chain)
-LAST_CERT=$(ls -1 /tmp/oci-os-cert-*.pem 2>/dev/null | tail -1)
-if [ -z "$LAST_CERT" ]; then
-    echo "  ERROR: Could not download certificate. Check network connectivity."
-    exit 1
+echo "=== Step 2: Download Oracle's pre-created walletSSL.zip ==="
+DOWNLOAD_OK=false
+if command -v curl &>/dev/null; then
+    if curl -fsSL -o "$WALLET_ZIP" "$WALLET_URL" 2>/dev/null; then
+        DOWNLOAD_OK=true
+    fi
+elif command -v wget &>/dev/null; then
+    if wget -q -O "$WALLET_ZIP" "$WALLET_URL" 2>/dev/null; then
+        DOWNLOAD_OK=true
+    fi
 fi
-cp "$LAST_CERT" "$CERT_FILE"
-echo "  Certificate saved: $CERT_FILE"
 
-echo ""
-echo "=== Step 3: Create Oracle auto-login wallet ==="
-if [ -f "$WALLET_DIR/cwallet.sso" ]; then
-    echo "  Wallet already exists at $WALLET_DIR/cwallet.sso"
-    echo "  Adding certificate to existing wallet..."
+if [ "$DOWNLOAD_OK" = true ] && [ -f "$WALLET_ZIP" ] && [ -s "$WALLET_ZIP" ]; then
+    echo "  Downloaded: $WALLET_ZIP"
+
+    echo ""
+    echo "=== Step 3: Unzip wallet to $WALLET_DIR ==="
+    unzip -o "$WALLET_ZIP" -d "$WALLET_DIR"
+    echo "  Wallet files extracted to: $WALLET_DIR"
+
+    echo ""
+    echo "=== Step 4: Verify wallet contents ==="
+    ls -la "$WALLET_DIR"/
+    if [ -f "$WALLET_DIR/cwallet.sso" ]; then
+        echo "  ✅ cwallet.sso found"
+    else
+        echo "  ⚠️  cwallet.sso not found — checking for alternative wallet files..."
+        ls -la "$WALLET_DIR"/*.sso "$WALLET_DIR"/*.p12 2>/dev/null || true
+    fi
+
+    rm -f "$WALLET_ZIP"
 else
-    orapki wallet create -wallet "$WALLET_DIR" -auto_login_only
-    echo "  Wallet created: $WALLET_DIR/cwallet.sso"
+    echo "  ⚠️  Could not download walletSSL.zip — falling back to manual wallet creation"
+    echo ""
+    echo "=== Fallback Step 2b: Download OCI Object Storage CA certificate ==="
+    CERT_FILE="/tmp/oci-os-cert.pem"
+    openssl s_client -connect objectstorage.${{REGION}}.oraclecloud.com:443 \\
+        -showcerts </dev/null 2>/dev/null | \\
+        awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/{{print}}' | \\
+        awk 'BEGIN{{n=0}} /BEGIN CERTIFICATE/{{n++}} n>0{{print > "/tmp/oci-os-cert-"n".pem"}}'
+
+    LAST_CERT=$(ls -1 /tmp/oci-os-cert-*.pem 2>/dev/null | tail -1)
+    if [ -z "$LAST_CERT" ]; then
+        echo "  ERROR: Could not download certificate. Check network connectivity."
+        exit 1
+    fi
+    cp "$LAST_CERT" "$CERT_FILE"
+    echo "  Certificate saved: $CERT_FILE"
+
+    echo ""
+    echo "=== Fallback Step 3b: Create Oracle auto-login wallet ==="
+    if [ -f "$WALLET_DIR/cwallet.sso" ]; then
+        echo "  Wallet already exists at $WALLET_DIR/cwallet.sso"
+    else
+        orapki wallet create -wallet "$WALLET_DIR" -auto_login_only
+        echo "  Wallet created: $WALLET_DIR/cwallet.sso"
+    fi
+
+    echo ""
+    echo "=== Fallback Step 4b: Add OCI certificate to wallet ==="
+    orapki wallet add -wallet "$WALLET_DIR" \\
+        -trusted_cert -cert "$CERT_FILE" -auto_login_only
+    echo "  Certificate added to wallet"
+
+    echo ""
+    echo "=== Fallback Step 5b: Verify wallet ==="
+    orapki wallet display -wallet "$WALLET_DIR" | grep -i "subject\\|trusted"
+
+    rm -f /tmp/oci-os-cert-*.pem "$CERT_FILE"
 fi
 
 echo ""
-echo "=== Step 4: Add OCI certificate to wallet ==="
-orapki wallet add -wallet "$WALLET_DIR" \\
-    -trusted_cert -cert "$CERT_FILE" -auto_login_only
-echo "  Certificate added to wallet"
-
-echo ""
-echo "=== Step 5: Verify wallet contents ==="
-orapki wallet display -wallet "$WALLET_DIR" | grep -i "subject\\|trusted"
-
-echo ""
-echo "=== Step 6: Set permissions ==="
-chmod 640 "$WALLET_DIR"/cwallet.sso
-ls -la "$WALLET_DIR"/cwallet.sso
+echo "=== Step 5: Set permissions ==="
+chmod 640 "$WALLET_DIR"/cwallet.sso 2>/dev/null || true
+chmod 640 "$WALLET_DIR"/ewallet.p12 2>/dev/null || true
+ls -la "$WALLET_DIR"/
 
 echo ""
 echo "=== Done! ==="
 echo ""
-echo "Now run these SQL commands as SYS/SYSDBA to create the directory objects:"
+echo "Now run these SQL commands as SYS/SYSDBA to create/verify the directory object:"
 echo ""
 echo "  CREATE OR REPLACE DIRECTORY {dp_dir_name} AS '{dp_dir_path}';"
-echo "  CREATE OR REPLACE DIRECTORY SSL_WALLET_DIR AS '{wallet_dir}';"
 echo "  GRANT READ, WRITE ON DIRECTORY {dp_dir_name} TO {username};"
 echo "  GRANT READ, WRITE ON DIRECTORY {dp_dir_name} TO {gg_username};"
-echo "  GRANT READ ON DIRECTORY SSL_WALLET_DIR TO {username};"
 echo ""
-
-# Cleanup temp certs
-rm -f /tmp/oci-os-cert-*.pem "$CERT_FILE"
+echo "The SSL wallet files are inside the Data Pump directory ({dp_dir_name})."
+echo "Use '{dp_dir_path}' as the SSL Wallet Path in your DMS migration."
+echo ""
 """
 
     with open(output_path, "w") as f:
@@ -691,9 +739,10 @@ rm -f /tmp/oci-os-cert-*.pem "$CERT_FILE"
     print(f"   Wallet dir: {wallet_dir}")
     print(f"   DataPump dir: {dp_dir_name} -> {dp_dir_path}")
     print(f"")
+    script_filename = os.path.basename(output_path)
     print(f"   Copy this script to the source DB server and run as oracle user:")
     print(f"   scp {output_path} oracle@{src.get('host')}:/tmp/")
-    print(f"   ssh oracle@{src.get('host')} 'bash /tmp/{output_path}'")
+    print(f"   ssh oracle@{src.get('host')} 'bash /tmp/{script_filename}'")
 
 
 def cmd_cleanup(args):
@@ -842,8 +891,8 @@ def main():
     wallet_parser = subparsers.add_parser("generate-wallet-script",
                                            help="Generate SSL wallet setup script for source DB server")
     wallet_parser.add_argument("--source", help="Source DB key (default: first source)")
-    wallet_parser.add_argument("--output", default="setup-ssl-wallet.sh",
-                               help="Output script path")
+    wallet_parser.add_argument("--output", default=None,
+                               help="Output script path (default: scripts/setup-ssl-wallet_<source>.sh)")
 
     # -- start-migration --
     start_parser = subparsers.add_parser("start-migration", help="Start (run) DMS migration jobs")

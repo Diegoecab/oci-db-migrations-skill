@@ -41,8 +41,7 @@
       "gg_username": "GGADMIN",
       "assessment_user": "DBSNMP",
       "datapump_dir_name": "DATA_PUMP_DIR",
-      "datapump_dir_path": "/u01/app/oracle/admin/ORCL/dpdump",
-      "ssl_wallet_dir": "/u01/app/oracle/admin/ORCL/dpdump"
+      "datapump_dir_path": "/u01/app/oracle/admin/ORCL/dpdump"
     }
   },
 

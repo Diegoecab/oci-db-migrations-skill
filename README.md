@@ -1,8 +1,8 @@
 # OCI Database Migration AI Skill
 
-**An AI skill that assesses, remediates, provisions, and orchestrates Oracle database migrations to Autonomous Database.**
+**An AI skill that prepares, provisions, and orchestrates Oracle database migrations to Autonomous Database.**
 
-Describe your migration scenario to an AI assistant. It assesses your databases, identifies gaps, generates fixes, provisions infrastructure, and guides you through cutover. The AI skill orchestrates the entire migration lifecycle using an embedded Knowledge Base of 40+ prerequisite checks and 20+ error patterns.
+Describe your migration scenario to an AI assistant. It assesses your databases, generates remediation scripts, executes fixes, and — optionally — provisions DMS infrastructure and guides you through cutover. Use it for the full lifecycle or just to get your source and target databases ready for a migration you manage through the OCI Console. The AI skill uses an embedded Knowledge Base of 40+ prerequisite checks and 20+ error patterns.
 
 ---
 
@@ -10,19 +10,39 @@ Describe your migration scenario to an AI assistant. It assesses your databases,
 
 You interact with an **AI assistant** loaded with the project's `SKILL.md`. The skill transforms any capable LLM into an OCI DMS migration specialist. It reads your configuration, executes assessment and provisioning tools, interprets results, and tells you exactly what to do next.
 
-**You say:** *"I need to migrate HR and SALES schemas from Oracle 19c on AWS RDS to ADB-S in Ashburn. HR is critical and needs a rollback path."*
+**You say:** *"I need to migrate HR and SALES schemas from Oracle 19c on AWS RDS to ADB-S in Ashburn."*
 
-**The AI assistant:**
+**The AI assistant** offers three workflows:
+
+### Full pipeline (the AI deploys DMS for you)
 
 | Step | What it does | Command |
 |------|-------------|---------|
-| 1 | Generates `migration-config.json` with RDS variant, 2 migrations (HR with GG fallback) | *(auto-generated)* |
+| 1 | Creates a migration project and generates `migration-config.json` | *(auto-generated)* |
 | 2 | Assesses source DB — finds 3 blockers | `migrate.py assess --source rds_prod` |
 | 3 | Generates remediation SQL, asks before executing | `migrate.py assess --generate-sql` |
 | 4 | Re-assesses: 0 blockers, ready | `migrate.py assess --source rds_prod` |
 | 5 | Deploys: vault, NSG, DMS connections, migrations, GoldenGate | `migrate.py deploy` |
 | 6 | Validates and starts migration jobs | `migrate.py start-migration` |
 | 7 | Monitors progress, advises on cutover timing | `migrate.py status --json` |
+
+### Prepare databases only (you deploy DMS via Console/Terraform)
+
+| Step | What it does | Command |
+|------|-------------|---------|
+| 1 | Creates a project and collects source/target details | *(auto-generated)* |
+| 2 | Assesses source & target DBs | `migrate.py assess --output json` |
+| 3 | Generates SQL scripts for all failed checks | `migrate.py assess --generate-sql` |
+| 4 | Optionally executes fixes directly on the databases | `migrate.py assess --remediate --source rds_prod` |
+| 5 | Re-assesses until all checks pass | `migrate.py assess --source rds_prod` |
+
+You take the prepared databases and create the DMS migration yourself through the OCI Console, Terraform, or any other method.
+
+### Scripts only (no DB connectivity needed)
+
+If the tool can't connect to the databases (no VPN, no credentials), it generates verification and remediation SQL scripts that you run manually and paste the results back.
+
+---
 
 The AI skill never connects to databases directly. A Python tool layer handles all connectivity, authentication, and OCI API calls. The skill handles interpretation, decision logic, sequencing, and guidance.
 
@@ -44,13 +64,10 @@ chmod +x setup.sh && ./setup.sh    # Auto-detects Python, installs deps, creates
 #    "I need to migrate schemas X, Y, Z from Oracle source to ADB.
 #     Here are my details: [source host, ADB OCID, compartment, etc.]"
 #
-#    The assistant will:
-#    - Generate your migration-config.json
-#    - Run probe to verify your environment
-#    - Assess source and target databases
-#    - Generate and execute remediation
-#    - Deploy infrastructure
-#    - Monitor and guide through cutover
+#    The assistant will ask what you want to do:
+#    a) Full pipeline — assess, remediate, deploy DMS, monitor, cutover
+#    b) Prepare databases only — assess + generate/execute scripts (you deploy DMS via Console)
+#    c) Scripts only — generate SQL scripts for manual execution (no DB connectivity needed)
 ```
 
 **Advisory mode** — for chat interfaces without code execution:
@@ -147,11 +164,13 @@ cp migration-config.json.example migration-config.json
 
 ### What It Does
 
-The `ai/SKILL.md` file is a system prompt that transforms any capable LLM into an OCI DMS migration specialist with three capabilities:
+The `ai/SKILL.md` file is a system prompt that transforms any capable LLM into an OCI DMS migration specialist with these capabilities:
 
-**Config Generation** — Describe your environment (source type, schemas, target ADB, criticality), and the assistant generates a complete, validated `migration-config.json`. It sets the correct `db_type` variant (RDS uses `rdsadmin` procedures, not standard SQL), configures GoldenGate fallback only where needed, and includes tablespace remapping for ADB.
+**Project Setup** — Create a new migration project from scratch. Describe your environment (source type, schemas, target ADB, criticality), and the assistant generates a complete, validated `migration-config.json`. Auto-discovers OCI resources via CLI or accepts manual OCIDs.
 
-**Assessment + Remediation** — The assistant runs the assessment tool, reads the structured results, groups related failures (GGADMIN missing → all privilege checks cascade), generates remediation SQL in the correct execution order, and re-verifies after fixes are applied.
+**Assessment + Scripts** — Assess source and target databases against 40+ prerequisite checks. Generate SQL scripts you can run yourself, or let the assistant execute fixes directly. Works even without DB connectivity — generates offline verification scripts for manual execution.
+
+**Deploy + Operate** — *(Optional)* Provision DMS connections, migrations, and GoldenGate deployments. Not everyone needs this — you can prepare your databases with this tool and deploy DMS through the OCI Console or Terraform instead.
 
 **Cutover Advisory** — The assistant evaluates replication lag trend, GoldenGate fallback state, source load, and timing to give a go/no-go recommendation with an execution sequence and rollback plan.
 
@@ -335,8 +354,7 @@ Key sections:
       "gg_username": "GGADMIN",
       "assessment_user": "DBSNMP",    // Read-only user for pre-migration checks
       "datapump_dir_name": "DATA_PUMP_DIR",
-      "datapump_dir_path": "/u01/app/oracle/admin/ORCL/dpdump",
-      "ssl_wallet_dir": "/u01/app/oracle/admin/ORCL/dpdump"
+      "datapump_dir_path": "/u01/app/oracle/admin/ORCL/dpdump"
       // ...
     }
   },

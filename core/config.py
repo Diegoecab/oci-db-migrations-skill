@@ -264,12 +264,7 @@ class MigrationConfig:
                     f"source_databases.{key}: 'datapump_dir_path' not set. "
                     "Required for remediation — set the OS path on the DB server."
                 )
-            if not src.get("ssl_wallet_dir"):
-                self._warnings.append(
-                    f"source_databases.{key}: 'ssl_wallet_dir' not set. "
-                    "Required for Data Pump via Object Storage (HTTPS). "
-                    "Set the path where the SSL wallet (cwallet.sso) is/will be."
-                )
+            # SSL wallet goes inside datapump_dir_path — no separate field needed
 
     def _validate_targets(self):
         if not self.target_databases:

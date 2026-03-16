@@ -32,7 +32,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '[SESSION_START] OCI Database Migration AI Skill is active. Show the welcome banner from ai/SKILL.md on the user first message. If a migration journal exists, include current pipeline state summary and suggest next action.'",
+            "command": "echo '[SESSION_START] OCI Database Migration AI Skill is active. Show the welcome banner from ai/SKILL.md on the user first message. If a migration journal exists, include current pipeline state summary and present options (continue / add migration / new project). If no journal, offer fresh-start options.'",
             "timeout": 5
           }
         ]
