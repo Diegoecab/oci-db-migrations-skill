@@ -92,6 +92,7 @@ oci db autonomous-database list --compartment-id <compartment_ocid> --query "dat
 
 ## Important Notes
 
+- **NEVER use `2>&1` when piping OCI CLI output to a JSON parser** (python, jq, etc.). OCI CLI on Python 3.6 emits `CryptographyDeprecationWarning` to stderr — `2>&1` mixes it into stdout and corrupts JSON parsing ("Extra data" error). Always use `2>/dev/null` to discard stderr when piping to parsers: `oci ... --output json 2>/dev/null | python3 -c "..."`. Alternatively, use `--query` with `--output table` to avoid piping JSON entirely.
 - Always add `--profile <profile>` when the user specifies a non-DEFAULT profile
 - Suppress warnings with env vars: `export OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True && export SUPPRESS_LABEL_WARNING=True`
 - For key listing, use `--endpoint` (not `--management-endpoint`) with the vault's management endpoint URL
