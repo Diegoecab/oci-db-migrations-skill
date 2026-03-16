@@ -391,14 +391,19 @@ When the user chooses auto-discovery, **request blanket approval for OCI CLI rea
 >
 > - `oci iam region-subscription list` — verify authentication
 > - `oci iam compartment list` — list compartments
-> - `oci network vcn list` / `subnet list` / `nsg list` — networking
-> - `oci kms management vault list` / `key list` — encryption
-> - `oci os bucket list` / `ns get` — Object Storage
-> - `oci db autonomous-database get` / `list` — ADB details
+> - `oci database-migration migration list` — existing DMS migrations
+> - `oci database-migration connection list` — existing DMS connections
 >
 > Can I proceed with all of these without asking each time? (yes/no)
 
-Once approved, execute all discovery commands without further confirmation.
+Once approved, execute discovery in this order:
+
+1. **Authenticate** and select compartment
+2. **List DMS migrations and connections** in the compartment — this is the primary discovery target
+3. **Present findings**: existing migrations with their state, connections with their types
+4. If no migrations exist, say so and proceed to project setup
+
+**Infrastructure resources** (VCN, subnet, vault, key, bucket, ADB) are discovered **later**, only when needed to configure a new migration or inspect an existing one. Do NOT enumerate all infrastructure upfront.
 
 For the full discovery sequence and CLI command reference, see [DISCOVERY.md](DISCOVERY.md).
 
