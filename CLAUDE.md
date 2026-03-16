@@ -38,6 +38,13 @@ These rules are specific to running inside Claude Code and override general SKIL
 - **ALWAYS use the AskUserQuestion tool** (arrow-key selectable options) for decision points. Never present options as plain text.
 - Keep options to 2-4 choices, concise labels, with a short description for each.
 
+## OCI CLI Rules (CRITICAL)
+
+- **NEVER generate inline Python, jq, or awk to parse OCI CLI output.** This is a hard rule — no exceptions.
+- **ALWAYS use `--query` (JMESPath) + `--output table`** to filter and format OCI CLI results. The exact `--query` expressions for every command are in `ai/DISCOVERY.md` — use them as-is.
+- If you need parsing beyond what `--query` supports, add a command to `migrate.py`. Never write ad-hoc code.
+- **NEVER use `2>&1`** when piping OCI CLI output — use `2>/dev/null` if needed.
+
 ## Workflow Order
 
 1. Read migration journal (if exists) to understand current state
