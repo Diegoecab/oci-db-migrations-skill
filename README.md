@@ -623,18 +623,6 @@ EXEC RDSADMIN.RDSADMIN_UTIL.GRANT_SYS_OBJECT('TAB$', 'GGADMIN');
 
 Plus: `UNLIMITED TABLESPACE`, `SELECT ANY DICTIONARY`, `CREATE VIEW`.
 
-#### Source — GGADMIN (when NOT the replication user)
-
-If a different user is the replication user (non-standard), GGADMIN still needs minimum privileges for the switchover phase:
-
-```sql
-SELECT ANY DICTIONARY
-SELECT ANY TRANSACTION
-SELECT ON V_$SESSION
-SELECT ON V_$TRANSACTION
-SELECT ON V_$DATABASE
-```
-
 #### Target — ADB (Autonomous Database)
 
 On ADB, `GGADMIN` is pre-created but locked by default. Required setup:
