@@ -158,20 +158,22 @@ A non-interactive wrapper around Oracle's script that:
 
 ```bash
 # Source — CDB+PDB, online
-./scripts/generate-prep-sql.sh --source --online --multitenant --pdb-service PEPE --identifier PEPE
+bash scripts/generate-prep-sql.sh --source --online --multitenant --pdb-service PEPE --identifier PEPE
 
 # Source — single-tenant, offline
-./scripts/generate-prep-sql.sh --source --offline --identifier PROD_ST
+bash scripts/generate-prep-sql.sh --source --offline --identifier PROD_ST
 
 # Source — RDS
-./scripts/generate-prep-sql.sh --source --online --rds --identifier RDS_PROD
+bash scripts/generate-prep-sql.sh --source --online --rds --identifier RDS_PROD
 
 # Target — ADB
-./scripts/generate-prep-sql.sh --target --online --adb --identifier ADB_PROD
+bash scripts/generate-prep-sql.sh --target --online --adb --identifier ADB_PROD
 
 # Target — non-ADB PDB
-./scripts/generate-prep-sql.sh --target --online --multitenant --pdb-service TGT_PDB --identifier TGT_PDB
+bash scripts/generate-prep-sql.sh --target --online --multitenant --pdb-service TGT_PDB --identifier TGT_PDB
 ```
+
+**Always invoke with `bash scripts/...`** (not `./scripts/...`) to avoid permission-denied errors.
 
 **Output files** (all in `scripts/`, excluded from git via `*.sql` in `.gitignore`):
 - `dms_prep_{source|target}_{IDENTIFIER}.sql` — Phase 1: run on DB as SYSDBA (or ADMIN for ADB)
@@ -180,10 +182,36 @@ A non-interactive wrapper around Oracle's script that:
 ### Skill behavior for DB preparation
 
 1. **Determine parameters** from the migration config or user input: source/target, db type (RDS/ADB/multi/single), PDB service name, migration type (online/offline). **Do NOT ask for schemas** — the Oracle script does not need them.
-2. **Run the wrapper**: `./scripts/generate-prep-sql.sh` with the appropriate flags.
+2. **Run the wrapper**: `bash scripts/generate-prep-sql.sh` with the appropriate flags (use `bash` to avoid permission issues).
 3. **Deliver Phase 1 script** to the user with instructions on where and how to run it.
 4. **Interpret Phase 2 output**: If the user pastes the `DMS_Configuration_*.sql` content, interpret what changes are needed and advise.
 5. **Re-validate**: After the user applies fixes, suggest running Phase 1 again to confirm all checks pass.
+
+### Helper Queries for the User
+
+When asking for database details the user may not know off the top of their head, **always offer the SQL query they can run** to get the answer. Include these as part of your question:
+
+```sql
+-- List PDB services (run on CDB as SYSDBA)
+SELECT name, open_mode FROM v$pdbs;
+
+-- Data Pump directory name and path
+SELECT directory_name, directory_path FROM dba_directories WHERE directory_name LIKE '%DATA%PUMP%' OR directory_name LIKE '%DUMP%';
+
+-- CDB service name
+SELECT name, db_unique_name FROM v$database;
+
+-- Check if database is CDB
+SELECT cdb FROM v$database;
+
+-- Hostname / FQDN from the database
+SELECT host_name FROM v$instance;
+
+-- Archivelog mode
+SELECT log_mode FROM v$database;
+```
+
+When asking for a specific piece of info (e.g., Data Pump dir path), include only the relevant query — not all of them.
 
 ### When the skill has DB connectivity
 
