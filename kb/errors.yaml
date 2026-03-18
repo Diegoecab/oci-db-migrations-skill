@@ -44,6 +44,20 @@ dms_errors:
     severity: recoverable
     doc_url: "https://docs.oracle.com/en-us/iaas/database-migration/doc/known-issues-oracle-migrations.html"
 
+  - pattern: "PRGZ-1141.*failed to verify configuration and status"
+    phase: "ZDM_DISCOVER_SRC"
+    description: "DMS/ZDM cannot reach source DB during validation. Often accompanied by PRGD-1059 (NLS query failed) and PRGD-1002 (SELECT GLOBAL_NAME failed). Root cause is network — ZDM agent connects to wrong IP or cannot reach the host."
+    fix: >
+      1. Check if DMS connection has an FQDN that resolves to a different IP than intended.
+         The DMS console may show the correct IP but ZDM internally resolves the FQDN to another address.
+      2. Edit the connection and set the host to the private IP directly (not FQDN).
+      3. If Edit does not fix it, DELETE and RECREATE the connection with the correct IP —
+         DMS silently ignores some field updates (known issue, same as replication_username).
+      4. Verify NSG/Security List allows inbound 1521 from the DMS subnet.
+      5. Ensure both host (IP) and hostname (FQDN) fields are set correctly in the connection config.
+    severity: config_error
+    related_errors: ["PRGD-1059", "PRGD-1002"]
+
 oracle_errors:
   - pattern: "ORA-39001|ORA-39002|ORA-39070"
     description: "Data Pump directory or privilege error"

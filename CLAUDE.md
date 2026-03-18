@@ -28,7 +28,7 @@ python migrate.py diagnose "ORA-XXXXX"           # Troubleshoot errors
 
 **Always start** with the welcome banner from `ai/SKILL.md` (adapt language to match the user). Then:
 
-- If a **migration journal exists**: show current state summary, pipeline progress map, and **ask the user what they want to do** — continue the current project, add a new migration, or start a new project. Never just suggest the next step without offering these options.
+- If a **migration journal exists**: show current state summary, pipeline progress map, and **ask the user what they want to do** — continue the current project, add a new migration, analyze CPAT checks, or start a new project. Never just suggest the next step without offering these options.
 - If **no journal**: ask what the user wants to do (new project, prepare DBs only, or full pipeline).
 
 ## Claude Code Overrides
@@ -45,10 +45,30 @@ These rules are specific to running inside Claude Code and override general SKIL
 - If you need parsing beyond what `--query` supports, add a command to `migrate.py`. Never write ad-hoc code.
 - **NEVER use `2>&1`** when piping OCI CLI output — use `2>/dev/null` if needed.
 
+## CPAT Analysis (kb/cpat-checks.yaml)
+
+Full CPAT check catalog extracted from CPAT 26.2.0 (KB139585, MOS Doc ID 2758371.1). Covers 100+ checks across 20 categories with official rule, impact, action, and fixup SQL.
+
+**When to use**: User shares DMS validation screenshot/results, CPAT report (JSON/HTML/TEXT), or asks about ADB compatibility checks.
+
+**Flow**:
+1. Match check names to `kb/cpat-checks.yaml`
+2. Present findings with official rule/impact/action
+3. Offer fixup scripts (static_fixup from KB, or recommend `--genfixups`)
+4. Ask: scripts only, connect to source, or connect to target to execute
+5. After fixes, suggest re-validation
+
+**CPAT ZIP auto-refresh**: If `docs/KB139585/p*.zip` changes, re-extract `check_messages.properties` from `lib/premigration.jar` and regenerate `kb/cpat-checks.yaml`.
+
+**Required privileges** (CPAT is READ-ONLY):
+- `SELECT ANY DICTIONARY` + `SELECT on SYSTEM.DUM$COLUMNS` and `SYSTEM.DUM$DATABASE` (for NLS checks)
+- With `--sysdba`: no additional grants needed
+- For ADB Serverless source: `SELECT_CATALOG_ROLE`
+
 ## Workflow Order
 
 1. Read migration journal (if exists) to understand current state
-2. If journal exists: ask — continue project, add migration, or new project
+2. If journal exists: ask — continue project, add migration, new project, **or analyze CPAT checks**
 3. If no journal: ask — new project, prepare DBs only, or full pipeline
 4. Ask discovery mode (A: auto-discover / B: manual OCIDs) — only if creating a new project
 5. If new project: get blanket CLI approval, then discover all resources automatically

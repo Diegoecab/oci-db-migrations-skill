@@ -1,0 +1,881 @@
+# =============================================================================
+# CPAT Checks Knowledge Base — Cloud Premigration Advisor Tool
+# =============================================================================
+# Source: Oracle KB139585 (MOS Doc ID 2758371.1) + CPAT 26.2.0 check_messages.properties
+# These checks run during DMS migration validation and standalone CPAT analysis.
+# CPAT generates fixup scripts with --genfixups (source/ and target/ subfolders).
+#
+# Result levels:
+#   - Passing: Migration should succeed
+#   - Review Suggested: Likely OK but DBA should evaluate
+#   - Review Required: May succeed but post-migration work needed
+#   - Action Required: Would likely cause migration failure — resolve before migrating
+#   - Failed: CPAT could not complete analysis
+#
+# Scope: SCHEMA | SCHEMA_ONLY | INSTANCE | UNIVERSAL
+#
+# To auto-refresh: if docs/KB139585/p*.zip changes, re-extract check_messages.properties
+# from lib/premigration.jar and regenerate this file.
+# =============================================================================
+
+cpat_tool:
+  mos_doc_id: "2758371.1"
+  kb_article: "KB139585"
+  version: "26.2.0"
+  zip_path: "docs/KB139585/p32613591_112048_Generic.zip"
+  jar_path: "lib/premigration.jar"
+  messages_file: "check_messages.properties"
+  run_standalone: |
+    ./premigration.sh --connectstring jdbc:oracle:thin:@<host>:<port>/<service>
+      --targetcloud ATPS --username SYSTEM --schemas TESTUSER TESTUSER1
+      --reportformat TEXT JSON HTML --genfixups --outdir ./cpat_output
+  run_with_target_props: |
+    # First get target properties:
+    ./premigration.sh --gettargetprops --username ADMIN
+      --connectstring 'jdbc:oracle:thin:@<service>?TNS_ADMIN=<wallet-path>'
+    # Then run with --analysisprops:
+    ./premigration.sh --connectstring ... --analysisprops premigration_advisor_analysis.properties
+      --targetcloud ATPS --genfixups
+
+  # ---------------------------------------------------------------------------
+  # Required privileges to run CPAT (READ-ONLY — CPAT never modifies the DB)
+  # ---------------------------------------------------------------------------
+  required_privileges:
+    minimum:
+      - SELECT ANY DICTIONARY
+      - "SELECT on SYSTEM.DUM$COLUMNS"
+      - "SELECT on SYSTEM.DUM$DATABASE"
+    notes:
+      - "DUM$ table access is needed ONLY if source and target character sets differ (NLS conversion checks)"
+      - "When using --username, the user must have SELECT ANY DICTIONARY"
+      - "When using OS authentication or SYS, add --sysdba flag"
+      - "When using XTTS migration method, also need EXECUTE on SYS.DBMS_TTS"
+      - "For ADB Serverless as source, grant SELECT_CATALOG_ROLE"
+      - "CPAT is READ-ONLY: it does not create users, packages, or require granting roles/privileges"
+    grant_sql: |
+      -- Minimum grants for a dedicated CPAT user (e.g., CPAT_USER):
+      GRANT CREATE SESSION TO cpat_user;
+      GRANT SELECT ANY DICTIONARY TO cpat_user;
+      -- Only if NLS character set conversion check is needed:
+      GRANT SELECT ON SYSTEM.DUM$COLUMNS TO cpat_user;
+      GRANT SELECT ON SYSTEM.DUM$DATABASE TO cpat_user;
+      -- For XTTS migration method only:
+      -- GRANT EXECUTE ON SYS.DBMS_TTS TO cpat_user;
+
+# =============================================================================
+# Checks — grouped by category
+# =============================================================================
+
+checks:
+
+  # ---------------------------------------------------------------------------
+  # common_entities_and_privileges
+  # ---------------------------------------------------------------------------
+  - id: has_common_entities
+    category: common_entities_and_privileges
+    short_title: Common entities (C## users/roles)
+    rule: "Common entities are not migrated by Data Pump and are not supported on ADB"
+    impact: "Anything dependent on common entities will fail to migrate properly"
+    action: "Recreate on target prior to migration. C## prefix not allowed on ADB — recreate as local users/roles"
+    fixup_notes: "ADB does not allow C## prefix; IDENTIFIED BY VALUES not allowed on ADB"
+
+  - id: has_role_privileges
+    category: common_entities_and_privileges
+    short_title: Prohibited or missing role privileges
+    rule: "Some role privileges used in the source DB are either missing from, or prohibited in the target ADB"
+    impact: "Applications may encounter operation failures"
+    action: "Verify no prohibited ADB roles are used; recreate custom roles on ADB before migration"
+
+  - id: has_sys_privileges
+    category: common_entities_and_privileges
+    short_title: Prohibited system privileges
+    rule: "Some system privileges used in the source DB are prohibited in the target ADB"
+    impact: "Operation failures"
+    action: "Replace prohibited system privileges with ADB alternatives"
+
+  - id: has_users_lack_create_privileges
+    category: common_entities_and_privileges
+    short_title: Users missing CREATE privileges
+    rule: "Objects belonging to users who lack CREATE privileges may not migrate"
+    impact: "Data Pump recreates user without required privileges, causing import failures"
+    action: "Grant necessary CREATE privileges before migration"
+    static_fixup:
+      before: "GRANT CREATE ALL PRIVILEGES to affected users BEFORE migration"
+      after: "REVOKE CREATE ALL PRIVILEGES AFTER migration to restore security"
+
+  - id: has_users_objects_no_quota
+    category: common_entities_and_privileges
+    short_title: Users without tablespace quota
+    rule: "Users without relevant tablespace quota won't have objects migrated"
+    impact: "ORA-01536 errors, incomplete migration"
+    action: "Assign appropriate quota or GRANT UNLIMITED TABLESPACE before migration"
+    static_fixup:
+      before: "GRANT UNLIMITED TABLESPACE"
+      after: "REVOKE UNLIMITED TABLESPACE"
+
+  - id: has_users_with_10g_password_version
+    category: common_entities_and_privileges
+    short_title: 10G password version
+    rule: "More secure password encryption required on ADB"
+    impact: "ORA-1017 errors post migration, ORA-39384 warnings during Data Pump"
+    action: "Change password encryption (>10G) for listed users before migration"
+
+  - id: has_profile_not_default
+    category: common_entities_and_privileges
+    short_title: Non-default PROFILE
+    rule: "Schemas whose PROFILE is not available on target"
+    impact: "Schema creation fails due to missing PROFILE"
+    action: "Use full mode in Data Pump or pre-create needed profiles on target"
+
+  - id: has_user_defined_pvfs
+    category: common_entities_and_privileges
+    short_title: User-defined Password Verification Functions
+    rule: "ADB has restrictions for user-defined Password Verification Functions"
+    impact: "PVFs are imported to ADMIN not SYS; SYS functionality not available to ADMIN will fail"
+    action: "Review PVF sources and remove SYS-only functionality"
+
+  # ---------------------------------------------------------------------------
+  # sys_system_objects
+  # ---------------------------------------------------------------------------
+  - id: has_user_defined_objects_in_sys
+    category: sys_system_objects
+    short_title: User objects in SYS
+    rule: "User-defined objects in SYS schemas will not be exported"
+    impact: "Applications relying on user-defined objects in SYS will fail"
+    action: "Recreate required objects in SYS on target prior to migration; update hardcoded references"
+
+  - id: has_user_defined_objects_in_system
+    category: sys_system_objects
+    short_title: User objects in SYSTEM
+    rule: "User-defined objects in SYSTEM cannot be imported in ADB"
+    impact: "Applications relying on objects in SYSTEM will fail"
+    action: "Recreate required objects in SYSTEM prior to migration"
+
+  - id: has_refs_to_user_objects_in_sys
+    category: sys_system_objects
+    short_title: Dependencies on SYS/SYSTEM user objects
+    rule: "Objects in user schemas depending on user-defined objects in SYS/SYSTEM will not migrate"
+    impact: "Migration fails for those objects"
+    action: "Move required objects from SYS/SYSTEM to user schemas prior to migration; update references"
+
+  - id: has_fmw_registry_in_system
+    category: sys_system_objects
+    short_title: FMW Schema Version Registry in SYSTEM
+    rule: "FMW Schema Version Registry must be moved out of SYSTEM"
+    impact: "FMW upgrade loses vital info"
+    action: "Use './ua -backupRegistry' to backup, then migrate"
+
+  - id: has_csmig_schema
+    category: sys_system_objects
+    short_title: CSSCAN/CSMIG objects present
+    rule: "CSSCAN utility no longer supported, replaced by DMU"
+    impact: "Migration tools can ignore CSSCAN objects"
+    action: "Remove CSMIG user and CSSCAN objects"
+    has_static_fixup: true
+
+  - id: has_sqlt_objects_adb
+    category: sys_system_objects
+    short_title: SQLTXPLAIN objects (ADB)
+    rule: "SQLTXPLAIN not supported on ADB"
+    impact: "Import errors"
+    action: "Use sqdrop.sql to drop all SQLTXPLAIN/SQLTXADMIN objects"
+
+  - id: has_sqlt_objects_default
+    category: sys_system_objects
+    short_title: SQLTXPLAIN objects (non-ADB)
+    rule: "SQLTXPLAIN installs objects not exported by Data Pump"
+    impact: "Import errors"
+    action: "Run sqcreate.sql on target after import"
+
+  # ---------------------------------------------------------------------------
+  # character_sets_and_nls
+  # ---------------------------------------------------------------------------
+  - id: nls_character_set_conversion
+    category: character_sets_and_nls
+    short_title: Character set conversion
+    rule: "Conversion between character sets may cause expansion or loss"
+    impact: "ORA-1401 or loss of invalid character codes"
+    action: "1) Provision target with same charset, or 2) Scan with DMU (Database Migration Assistant for Unicode)"
+    fixup_notes: "Various sub-messages about DMU repo found/not found/scanned"
+
+  - id: nls_national_character_set
+    category: character_sets_and_nls
+    short_title: National character set conversion
+    rule: "Check national character set conversion issues"
+    impact: "ORA-01401 or loss during conversion"
+    action: "Provision target with same national charset if possible"
+
+  - id: nls_nchar_ora_910
+    category: character_sets_and_nls
+    short_title: NCHAR/NVARCHAR2 max length exceeded
+    rule: "NCHAR/NVARCHAR2 columns exceeding max length for target charset"
+    impact: "ORA-00910 during migration"
+    action: "Provision target with same national charset and enable Extended Data Types"
+
+  - id: has_illegal_characters_in_comments
+    category: character_sets_and_nls
+    short_title: Illegal characters in comments/PL/SQL
+    rule: "Illegal characters in TABLE/COLUMN comments or PL/SQL sources"
+    impact: "ORA-39346 data loss errors during import"
+    action: "Delete or replace illegal characters with valid characters"
+
+  # ---------------------------------------------------------------------------
+  # data_types_and_storage
+  # ---------------------------------------------------------------------------
+  - id: has_tables_with_long_raw_datatype
+    category: data_types_and_storage
+    short_title: LONG/LONG RAW with HCC or compression disabled
+    rule: "LONG/LONG RAW with HCC compression or compression DISABLED"
+    impact: "Applications relying on LONG/LONG RAW will fail"
+    action: "Pre-create tables in ADWS with compression enabled"
+
+  - id: has_tables_with_xmltype_column
+    category: data_types_and_storage
+    short_title: XMLType columns not BINARY XML
+    rule: "XMLType columns must use BINARY XML storage"
+    impact: "XMLType columns not stored as BINARY XML will fail"
+    action: "Change XMLType storage to BINARY XML"
+
+  - id: has_xmltype_tables_clob
+    category: data_types_and_storage
+    short_title: XMLType tables stored as CLOB
+    rule: "XMLType tables stored as CLOB won't migrate"
+    impact: "Applications fail"
+    action: "Change to BINARY XML storage"
+
+  - id: has_xmltype_tables_other
+    category: data_types_and_storage
+    short_title: XMLType tables non-BINARY XML storage
+    rule: "XMLType tables with non-BINARY XML storage"
+    impact: "Applications fail"
+    action: "Change to BINARY XML"
+
+  - id: has_xmlschema_objects
+    category: data_types_and_storage
+    short_title: XML Schema Objects
+    rule: "XML Schema Objects will not migrate"
+    impact: "Not supported in ADB"
+    action: "Modify application to not use XML Schema Objects"
+
+  - id: has_unstructured_xml_indexes
+    category: data_types_and_storage
+    short_title: Unstructured XML Indexes
+    rule: "Unstructured XML Indexes not supported on ADB"
+    impact: "Creation will fail"
+    action: "Recreate using XML Search Index"
+
+  - id: has_columns_with_media_data_types_adb
+    category: data_types_and_storage
+    short_title: Multimedia types ORDSYS (ADB)
+    rule: "Multimedia types (ORDSYS) not allowed in ADB"
+    impact: "Tables with multimedia columns fail"
+    action: "See MOS Doc ID 2555923.1"
+    mos_doc_id: "2555923.1"
+
+  - id: has_columns_with_media_data_types_default
+    category: data_types_and_storage
+    short_title: Multimedia types ORDSYS (non-ADB)
+    rule: "Multimedia types desupported in 19c"
+    impact: "Migration may fail"
+    action: "See ORACLE_HOME/ord/im/admin/README.txt"
+
+  - id: has_columns_with_spatial_data_types
+    category: data_types_and_storage
+    short_title: Spatial data types without JAVAVM
+    rule: "Spatial objects not fully supported on ADBS without JAVAVM"
+    impact: "Some spatial functionality unavailable"
+    action: "Enable JAVAVM on target"
+    has_static_fixup: true
+    fixup_notes: "BEGIN DBMS_CLOUD_ADMIN... to enable JAVAVM"
+
+  - id: has_columns_of_rowid_type
+    category: data_types_and_storage
+    short_title: ROWID/UROWID columns
+    rule: "ROWID/UROWID not enabled by default on ADBD"
+    impact: "Cannot be migrated"
+    action: "Set ALLOW_ROWID_COLUMN_TYPE=TRUE on target"
+    static_fixup: "ALTER SYSTEM SET ALLOW_ROWID_COLUMN_TYPE=TRUE SCOPE=BOTH;"
+
+  - id: has_columns_with_local_timezone
+    category: data_types_and_storage
+    short_title: DBTIMEZONE mismatch
+    rule: "DBTIMEZONE mismatch between source and target"
+    impact: "Data appears corrupted"
+    action: "Set DBTIMEZONE on target to match source"
+
+  - id: has_columns_with_tde_encryption
+    category: data_types_and_storage
+    short_title: TDE encrypted columns
+    rule: "TDE encrypted columns incompatible with cross-platform TTS"
+    impact: "Migration fails"
+    action: "Remove TDE column encryption before TTS migration"
+
+  - id: has_basic_file_lobs
+    category: data_types_and_storage
+    short_title: BASICFILE LOBs
+    rule: "BASICFILE LOBs not allowed in ADB"
+    impact: "Auto-converted to SECUREFILE at import"
+    action: "No action required"
+
+  - id: has_index_organized_tables
+    category: data_types_and_storage
+    short_title: Index-Organized Tables
+    rule: "IOT not allowed in ADB"
+    impact: "Created as regular table silently"
+    action: "No action required"
+
+  - id: has_clustered_tables
+    category: data_types_and_storage
+    short_title: Table clusters
+    rule: "Table clusters not allowed in ADB"
+    impact: "Created as regular table"
+    action: "Performance testing recommended"
+
+  # ---------------------------------------------------------------------------
+  # database_links_and_objects
+  # ---------------------------------------------------------------------------
+  - id: has_db_links
+    category: database_links_and_objects
+    short_title: Database Links
+    rule: "DB Links must be created natively in ADBS"
+    impact: "Applications fail until recreated"
+    action: "Pre-create using DBMS_CLOUD_ADMIN.CREATE_DATABASE_LINK"
+
+  - id: has_db_link_synonyms
+    category: database_links_and_objects
+    short_title: Synonyms with DB Links
+    rule: "Synonyms with DB Links require attention"
+    impact: "Application fails until recreated"
+    action: "After creating DB Links manually, recreate synonyms"
+
+  - id: has_directories
+    category: database_links_and_objects
+    short_title: Directory objects
+    rule: "Directory objects may reference inaccessible locations in ADB"
+    impact: "Applications using directories won't work"
+    action: "Recreate directories on ADB instance"
+
+  - id: has_external_tables_dedicated
+    category: database_links_and_objects
+    short_title: External tables (ADBD)
+    rule: "External tables must use Object Storage or File Storage on ADBD"
+    impact: "Applications fail"
+    action: "Use DBMS_CLOUD package to create External Tables"
+
+  - id: has_external_tables_serverless
+    category: database_links_and_objects
+    short_title: External tables (ADBS)
+    rule: "External tables must use Object Storage on ADBS"
+    impact: "Created as empty non-External tables"
+    action: "Drop empty imported table, recreate with DBMS_CLOUD"
+
+  - id: has_external_tables_default
+    category: database_links_and_objects
+    short_title: External tables (non-ADB)
+    rule: "External tables need DIRECTORY objects pre-created"
+    impact: "Schema mode migration fails"
+    action: "Pre-create DIRECTORY objects or use full mode"
+
+  - id: has_libraries_dedicated
+    category: database_links_and_objects
+    short_title: CREATE LIBRARY (ADBD)
+    rule: "CREATE LIBRARY not allowed on ADB"
+    impact: "Applications fail"
+    action: "Remove library dependencies"
+
+  - id: has_libraries_serverless
+    category: database_links_and_objects
+    short_title: CREATE LIBRARY (ADBS)
+    rule: "CREATE LIBRARY not allowed on ADB"
+    impact: "Applications fail"
+    action: "Remove library dependencies"
+
+  - id: has_public_synonyms
+    category: database_links_and_objects
+    short_title: Public Synonyms not migrated in SCHEMA mode
+    rule: "Data Pump doesn't migrate Public Synonyms in SCHEMA mode"
+    impact: "Applications relying on them won't work"
+    action: "Recreate on target or use FULL mode"
+
+  - id: has_dbms_credentials
+    category: database_links_and_objects
+    short_title: DBMS_CREDENTIAL/DBMS_SCHEDULER credentials
+    rule: "DBMS_CREDENTIAL/DBMS_SCHEDULER credentials can't be migrated"
+    impact: "ORA-27486 errors on import"
+    action: "Recreate using DBMS_CLOUD.CREATE_CREDENTIAL"
+    mos_doc_id: "2746284.1"
+
+  # ---------------------------------------------------------------------------
+  # goldengate_checks
+  # ---------------------------------------------------------------------------
+  - id: gg_enabled_replication
+    category: goldengate_checks
+    short_title: GG replication not enabled
+    rule: "ENABLE_GOLDENGATE_REPLICATION not set"
+    impact: "GG will not function"
+    action: "Execute the fixup SQL"
+    static_fixup: "ALTER SYSTEM SET ENABLE_GOLDENGATE_REPLICATION=TRUE SCOPE=BOTH;"
+
+  - id: gg_has_archivelog_enabled
+    category: goldengate_checks
+    short_title: Archive Log not enabled
+    rule: "Archive Log not enabled"
+    impact: "GG can miss replicating data"
+    action: "Enable archive log mode"
+
+  - id: gg_force_logging
+    category: goldengate_checks
+    short_title: Force logging not enabled
+    rule: "Force logging not enabled"
+    impact: "Source data in GG Extract may be missed"
+    action: "Execute the fixup SQL"
+    static_fixup: "ALTER DATABASE FORCE LOGGING;"
+
+  - id: gg_supplemental_log_data_min
+    category: goldengate_checks
+    short_title: Minimal supplemental logging not enabled
+    rule: "Minimal supplemental logging not enabled"
+    impact: "GG will not function"
+    action: "Execute the fixup SQL"
+    static_fixup: "ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;"
+
+  - id: gg_not_unique
+    category: goldengate_checks
+    short_title: Tables without PK/unique key
+    rule: "Tables without Primary Key, Unique Index or Key Columns"
+    impact: "GG may increasingly fall behind"
+    action: "Add primary/unique key or migrate via Data Pump"
+
+  - id: gg_not_unique_bad_col_yes
+    category: goldengate_checks
+    short_title: Tables without uniqueness + unbounded types
+    rule: "Tables without uniqueness AND with unbounded data types"
+    impact: "Records cannot be uniquely identified for logical replication"
+    action: "Add primary/unique key or migrate via Data Pump"
+
+  - id: gg_not_unique_bad_col_no
+    category: goldengate_checks
+    short_title: Tables without PK, no non-nullable unique index
+    rule: "Tables without PK and no non-nullable unique index"
+    impact: "High mutations may cause GG to fall behind"
+    action: "Add PK/unique or use other method"
+
+  - id: gg_tables_not_supported_adb
+    category: goldengate_checks
+    short_title: Tables not replicable via GG (ADB)
+    rule: "Tables that can't be replicated via GG"
+    impact: "Listed objects can't be replicated"
+    action: "Move via Data Pump at switchover"
+
+  - id: gg_tables_not_supported_default
+    category: goldengate_checks
+    short_title: Tables not replicable via GG (non-ADB)
+    rule: "Tables that can't be replicated via GG"
+    impact: "Listed objects can't be replicated"
+    action: "Move via Data Pump at switchover"
+
+  - id: gg_objects_not_supported
+    category: goldengate_checks
+    short_title: Objects requiring additional GG config
+    rule: "Objects requiring additional GG configuration"
+    impact: "Won't replicate without config"
+    action: "Consult GG documentation"
+
+  - id: gg_user_objects_in_ggadmin_schemas
+    category: goldengate_checks
+    short_title: User objects in GG admin schemas
+    rule: "User objects in GG admin schemas"
+    impact: "Cannot be migrated"
+    action: "Exclude these schemas from GG data migration"
+
+  - id: gg_has_low_streams_pool_size
+    category: goldengate_checks
+    short_title: Streams pool too small for GG
+    rule: "Streams pool too small for GG"
+    impact: "GG jobs may fail or perform poorly"
+    static_fixup: "ALTER SYSTEM SET streams_pool_size=1342177280 SCOPE=BOTH;"
+
+  - id: dp_has_low_streams_pool_size
+    category: goldengate_checks
+    short_title: Streams pool too small for Data Pump
+    rule: "Streams pool too small for Data Pump"
+    impact: "DP jobs may fail or perform poorly"
+    static_fixup: "ALTER SYSTEM SET streams_pool_size=256M SCOPE=BOTH;"
+
+  # ---------------------------------------------------------------------------
+  # tablespaces
+  # ---------------------------------------------------------------------------
+  - id: has_data_in_other_tablespaces_serverless
+    category: tablespaces
+    short_title: Custom tablespaces (ADBS)
+    rule: "Custom tablespaces on ADBS"
+    impact: "User-defined tablespaces not allowed; ADB-S ignores tablespace clause"
+    action: "ADB-S handles automatically; verify tablespace remapping"
+
+  - id: has_data_in_other_tablespaces_dedicated
+    category: tablespaces
+    short_title: Custom tablespaces (ADBD)
+    rule: "Custom tablespaces on ADBD"
+    impact: "Errors for tablespaces not pre-created"
+    action: "ZDM/DMS handle automatically, or pre-create"
+
+  - id: has_absent_default_tablespace
+    category: tablespaces
+    short_title: Default tablespace missing
+    rule: "Schema's default tablespace doesn't exist"
+    impact: "ORA-00959 errors"
+    action: "Specify valid default tablespace"
+
+  - id: has_absent_temp_tablespace
+    category: tablespaces
+    short_title: Temp tablespace missing
+    rule: "Schema's temp tablespace doesn't exist"
+    impact: "Errors on ADBD"
+    action: "ZDM/DMS handle automatically or pre-create"
+
+  - id: has_default_tablespace_not_data
+    category: tablespaces
+    short_title: Default tablespace is not DATA
+    rule: "Default tablespace is not DATA"
+    impact: "Modified to DATA in ADB"
+    action: "Ensure proper quota set post-migration"
+
+  - id: has_absent_tablespaces
+    category: tablespaces
+    short_title: Referenced tablespaces don't exist
+    rule: "Referenced tablespaces don't exist"
+    impact: "ORA-00959 errors"
+    action: "Pre-create or remap tablespaces"
+
+  # ---------------------------------------------------------------------------
+  # logging_and_compression
+  # ---------------------------------------------------------------------------
+  - id: has_logging_off_for_tables
+    category: logging_and_compression
+    short_title: NOLOGGING tables
+    rule: "NOLOGGING tables become LOGGING"
+    impact: "Automatic conversion"
+    action: "No action required"
+
+  - id: has_logging_off_for_partitions
+    category: logging_and_compression
+    short_title: NOLOGGING partitions
+    rule: "NOLOGGING partitions become LOGGING"
+    impact: "Automatic conversion"
+    action: "No action required"
+
+  - id: has_logging_off_for_subpartitions
+    category: logging_and_compression
+    short_title: NOLOGGING subpartitions
+    rule: "NOLOGGING subpartitions become LOGGING"
+    impact: "Automatic conversion"
+    action: "No action required"
+
+  - id: has_compression_disabled_for_objects
+    category: logging_and_compression
+    short_title: Compression disabled (ADW)
+    rule: "Must be compressed to QUERY HIGH in ADW"
+    impact: "Default compression QUERY HIGH applied"
+    action: "Add compression clause if different preference needed"
+
+  - id: has_parallel_indexes_enabled
+    category: logging_and_compression
+    short_title: Parallel indexes DEGREE > 1
+    rule: "Parallel DEGREE > 1 on indexes"
+    impact: "SQL may run in parallel unexpectedly"
+    action: "Change to NOPARALLEL or DEGREE 1"
+
+  # ---------------------------------------------------------------------------
+  # database_options_and_features
+  # ---------------------------------------------------------------------------
+  - id: has_java_objects
+    category: database_options_and_features
+    short_title: Java objects
+    rule: "Java objects won't migrate by default"
+    impact: "Applications relying on Java will fail"
+    action: "Enable JAVAVM on target"
+    has_static_fixup: true
+
+  - id: has_java_source
+    category: database_options_and_features
+    short_title: Java sources
+    rule: "Java sources won't migrate by default"
+    impact: "Applications relying on Java will fail"
+    action: "Enable JAVAVM on target"
+    has_static_fixup: true
+
+  - id: options_in_use_not_available_dedicated
+    category: database_options_and_features
+    short_title: Unavailable DB options (ADBD)
+    rule: "Some DB options not available on ADBD"
+    impact: "Dependent applications may not work"
+    action: "Verify application dependencies"
+
+  - id: options_in_use_not_available_serverless
+    category: database_options_and_features
+    short_title: Unavailable DB options (ADBS)
+    rule: "Some DB options not available on ADBS"
+    impact: "Dependent applications may not work"
+    action: "Verify application dependencies"
+
+  - id: modified_db_parameters_dedicated
+    category: database_options_and_features
+    short_title: Non-modifiable init parameters (ADBD)
+    rule: "Some init parameters can't be modified on ADBD"
+    impact: "Modified parameters won't be settable"
+    action: "See ADB documentation"
+
+  - id: modified_db_parameters_serverless
+    category: database_options_and_features
+    short_title: Non-modifiable init parameters (ADBS)
+    rule: "Some init parameters can't be modified on ADBS"
+    impact: "Modified parameters won't be settable"
+    action: "See ADB documentation"
+
+  - id: has_active_data_guard_dedicated
+    category: database_options_and_features
+    short_title: Active Data Guard (ADBD)
+    rule: "Active Data Guard configured"
+    impact: "Autonomous Data Guard has different capabilities"
+    action: "Consider Autonomous Data Guard"
+
+  - id: has_active_data_guard_serverless
+    category: database_options_and_features
+    short_title: Active Data Guard (ADBS)
+    rule: "Active Data Guard configured"
+    impact: "Autonomous Data Guard has different capabilities"
+    action: "Consider Autonomous Data Guard"
+
+  # ---------------------------------------------------------------------------
+  # timezone
+  # ---------------------------------------------------------------------------
+  - id: timezone_table_compatibility_higher_default
+    category: timezone
+    short_title: Source TZ version higher (non-ADB)
+    rule: "Source TZ_VERSION higher than target"
+    impact: "Migration not possible"
+    action: "Ensure target has >= source TZ version"
+
+  - id: timezone_table_compatibility_higher_dedicated
+    category: timezone
+    short_title: Source TZ version higher (ADBD)
+    rule: "Source TZ_VERSION higher than target"
+    impact: "Migration not possible"
+    action: "Ensure target has >= source TZ version"
+
+  - id: timezone_table_compatibility_higher_serverless
+    category: timezone
+    short_title: Source TZ version higher (ADBS)
+    rule: "Source TZ_VERSION higher than target"
+    impact: "Migration not possible"
+    action: "Ensure target has >= source TZ version"
+    has_static_fixup: true
+
+  # ---------------------------------------------------------------------------
+  # scheduler_and_jobs
+  # ---------------------------------------------------------------------------
+  - id: has_incompatible_jobs
+    category: scheduler_and_jobs
+    short_title: Incompatible scheduler job types
+    rule: "Scheduler jobs other than PLSQL_BLOCK/STORED_PROCEDURE not supported on ADB"
+    impact: "EXECUTABLE/EXTERNAL_SCRIPT won't run"
+    action: "Recreate using ADB-allowed types"
+
+  - id: has_enabled_scheduler_jobs
+    category: scheduler_and_jobs
+    short_title: Enabled scheduler jobs during export
+    rule: "Scheduler jobs may interfere with DP export"
+    impact: "ORA-39127 error during FULL export"
+    action: "Disable scheduler jobs during migration"
+
+  # ---------------------------------------------------------------------------
+  # grants_and_exports
+  # ---------------------------------------------------------------------------
+  - id: has_noexport_object_grants
+    category: grants_and_exports
+    short_title: Non-exportable object grants
+    rule: "Not all object grants exported by Data Pump"
+    impact: "Required grants may be missing on target"
+    action: "Recreate required grants"
+    mos_doc_id: "1911151.1"
+
+  - id: has_trusted_server_entries
+    category: grants_and_exports
+    short_title: TRUSTED_SERVER entries
+    rule: "TRUSTED_SERVER entries can't migrate to ADB"
+    impact: "DBMS_DISTRIBUTED_TRUST_ADMIN not available"
+    action: "Use EXCLUDE=TRUSTED_DB_LINK with Data Pump"
+
+  - id: has_workspaces
+    category: grants_and_exports
+    short_title: Oracle Workspaces
+    rule: "Oracle Workspaces not exported in SCHEMA mode"
+    impact: "Metadata/config not captured"
+    action: "Use FULL mode or manually export workspace data"
+
+  # ---------------------------------------------------------------------------
+  # audit
+  # ---------------------------------------------------------------------------
+  - id: unified_and_standard_traditional_audit_adb
+    category: audit
+    short_title: Traditional audit (unified + standard, ADB)
+    rule: "Traditional Audit deprecated 21c, desupported 23c"
+    impact: "Performance degradation"
+    action: "Delete traditional audit configurations"
+
+  - id: unified_and_standard_traditional_audit_default
+    category: audit
+    short_title: Traditional audit (unified + standard, non-ADB)
+    rule: "Traditional Audit deprecated 21c, desupported 23c"
+    impact: "Performance degradation"
+    action: "Delete traditional audit configurations"
+
+  - id: standard_traditional_audit_adb
+    category: audit
+    short_title: Traditional audit (standard only, ADB)
+    rule: "Traditional Audit deprecated 21c, desupported 23c"
+    impact: "Performance degradation"
+    action: "Delete traditional audit configurations"
+
+  - id: standard_traditional_audit_default
+    category: audit
+    short_title: Traditional audit (standard only, non-ADB)
+    rule: "Traditional Audit deprecated 21c, desupported 23c"
+    impact: "Performance degradation"
+    action: "Delete traditional audit configurations"
+
+  # ---------------------------------------------------------------------------
+  # xdb
+  # ---------------------------------------------------------------------------
+  - id: xdb_resource_view_has_entries_adb
+    category: xdb
+    short_title: XDB Repository (ADB)
+    rule: "XDB Repository not supported in ADB"
+    impact: "Applications relying on RESOURCE_VIEW may fail"
+    action: "Check application dependencies"
+
+  - id: xdb_resource_view_has_entries_default
+    category: xdb
+    short_title: XDB Repository (non-ADB)
+    rule: "XDB Repository not supported in ADB"
+    impact: "Applications relying on RESOURCE_VIEW may fail"
+    action: "Check application dependencies"
+
+  # ---------------------------------------------------------------------------
+  # data_pump_network_link
+  # ---------------------------------------------------------------------------
+  - id: has_tables_that_fail_with_dblink
+    category: data_pump_network_link
+    short_title: LONG/LONG RAW over NETWORK_LINK
+    rule: "LONG/LONG RAW may not migrate over NETWORK_LINK"
+    impact: "Applications relying on LONG tables may fail"
+    action: "Use Data Pump without NETWORK_LINK"
+
+  # ---------------------------------------------------------------------------
+  # ilm
+  # ---------------------------------------------------------------------------
+  - id: has_ilm_ado_policies
+    category: ilm
+    short_title: ILM ADO Policies
+    rule: "ILM ADO Policies won't migrate to ADB"
+    impact: "Tables created without ADO policy"
+    action: "No action required"
+
+  # ---------------------------------------------------------------------------
+  # inmemory
+  # ---------------------------------------------------------------------------
+  - id: has_inmemory_tables
+    category: inmemory
+    short_title: In-Memory tables
+    rule: "In-Memory not enabled in ADB"
+    impact: "Created with NO INMEMORY"
+    action: "No action required"
+
+  - id: has_inmemory_partitions
+    category: inmemory
+    short_title: In-Memory partitions
+    rule: "In-Memory not enabled in ADB"
+    impact: "Created with NO INMEMORY"
+    action: "No action required"
+
+  - id: has_inmemory_subpartitions
+    category: inmemory
+    short_title: In-Memory subpartitions
+    rule: "In-Memory not enabled in ADB"
+    impact: "Created with NO INMEMORY"
+    action: "No action required"
+
+  # ---------------------------------------------------------------------------
+  # oracle_streams
+  # ---------------------------------------------------------------------------
+  - id: has_oracle_streams
+    category: oracle_streams
+    short_title: Oracle Streams configured
+    rule: "Streams desupported since 19c"
+    impact: "Streams feature configured"
+    action: "Remove Streams setup"
+
+  # ---------------------------------------------------------------------------
+  # tts (Transportable Tablespaces)
+  # ---------------------------------------------------------------------------
+  - id: tts_has_tbs_dependencies
+    category: tts
+    short_title: Cross-tablespace dependencies
+    rule: "Objects with dependencies in other tablespaces"
+    impact: "TTS migration fails"
+    action: "Drop or move dependent objects"
+
+  - id: tts_incorrect_edition
+    category: tts
+    short_title: Edition mismatch for TTS
+    rule: "Both source and target must be Enterprise Edition"
+    impact: "Cross-platform TTS won't work"
+    action: "Ensure both are EE"
+
+  - id: tts_tbs_exists_in_target
+    category: tts
+    short_title: Tablespace already exists in target
+    rule: "Tablespace already exists in target"
+    impact: "Migration fails"
+    action: "Ensure none of the source tablespaces exist in target"
+
+  - id: tts_has_low_streams_pool_size
+    category: tts
+    short_title: Streams pool too small for TTS
+    rule: "Streams pool too small for TTS"
+    impact: "TTS jobs may fail"
+    static_fixup: "ALTER SYSTEM SET streams_pool_size=268435456 SCOPE=BOTH;"
+
+  # ---------------------------------------------------------------------------
+  # triggers
+  # ---------------------------------------------------------------------------
+  - id: has_disallowed_triggers
+    category: triggers
+    short_title: STARTUP/SHUTDOWN triggers (ADBS)
+    rule: "STARTUP/SHUTDOWN triggers not supported on ADB Serverless"
+    impact: "Triggers won't function"
+    action: "See ADB documentation for alternatives"
+
+  # ---------------------------------------------------------------------------
+  # misc
+  # ---------------------------------------------------------------------------
+  - id: has_mining_model_issues
+    category: misc
+    short_title: Mining Models with incorrect attributes
+    rule: "Mining Models with incorrect attributes"
+    impact: "ORA-39083 errors on import"
+    action: "Apply Patch ID 33270686"
+
+  - id: has_owner_mismatch_index_table
+    category: misc
+    short_title: Index/table owner mismatch
+    rule: "Index owned by different user than table"
+    impact: "ORA-00942 or ORA-39083 errors"
+    action: "Include both table and index owner in migration"
+
+  - id: has_higher_source_compatibility
+    category: misc
+    short_title: Source compatibility version too high
+    rule: "Source compatibility version higher than target"
+    impact: "TTS migration fails"
+    action: "Ensure source compatibility <= target"

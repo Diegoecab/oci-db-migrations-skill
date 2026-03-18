@@ -219,7 +219,7 @@ If the skill can connect to the database (e.g., via `assess --output json`), the
 - Oracle's script for the canonical DMS preparation
 - `assess` for additional checks (schema analysis, unsupported datatypes, OCI infra)
 
-Additionally, recommend **CPAT** (Cloud Premigration Advisor Tool, MOS Doc ID 2758371.1) for broader ADB compatibility checks.
+Additionally, use the **CPAT analysis flow** (see "CPAT — Cloud Premigration Advisor Tool" section below) for broader ADB compatibility checks.
 
 ### Files in `scripts/`
 
@@ -335,6 +335,7 @@ Journal best practices: append-only (never delete entries), concise but actionab
 ║                                                                   ║
 ║  PREPARE DATABASES                                                ║
 ║   ▸ Assess      — Check source & target DB readiness              ║
+║   ▸ CPAT        — Analyze CPAT checks, offer fixup scripts        ║
 ║   ▸ Scripts     — Generate SQL scripts (run them yourself)        ║
 ║   ▸ Remediate   — Execute fixes directly on source/target         ║
 ║                                                                   ║
@@ -367,12 +368,15 @@ Then show the pipeline progress map and **ask what the user wants to do** (do NO
 >
 > **Option B — Add a migration to this project**: Add a new source→target migration to the existing project and config. Reuses the same OCI infrastructure (VCN, subnet, vault, bucket).
 >
-> **Option C — New project**: Start a completely new migration project from scratch (new config, new journal).
+> **Option C — Analyze CPAT checks**: Share a DMS validation screenshot or CPAT report — I'll interpret the results, explain each check, and offer fixup scripts. I can connect to source or target to execute fixes.
+>
+> **Option D — New project**: Start a completely new migration project from scratch (new config, new journal).
 
 After the user chooses:
 - **Option A**: proceed with the next pending pipeline step as before.
 - **Option B**: enter the **Add Migration** flow (see below).
-- **Option C**: archive or discard the current journal, then enter the fresh-start flow (Option A/B/C below).
+- **Option C**: enter the **CPAT Analysis** flow (see "CPAT — Cloud Premigration Advisor Tool" section).
+- **Option D**: archive or discard the current journal, then enter the fresh-start flow (Option A/B/C below).
 
 ### Add Migration Flow (Option B — existing project)
 
@@ -491,7 +495,7 @@ Detailed reference material is split into separate files loaded on demand:
 - **[CONFIG-SCHEMA.md](CONFIG-SCHEMA.md)** — migration-config.json schema, resource naming convention, and source DB variants
 - **[EVALUATIONS.md](EVALUATIONS.md)** — Test scenarios for skill behavior verification
 
-For prerequisite checks, consult `kb/prerequisites.yaml` directly. For error patterns, consult `kb/errors.yaml` directly.
+For prerequisite checks, consult `kb/prerequisites.yaml` directly. For error patterns, consult `kb/errors.yaml` directly. For CPAT checks (DMS validation / ADB compatibility), consult `kb/cpat-checks.yaml` directly.
 
 ## Conversation Patterns
 
@@ -534,6 +538,82 @@ When a user shares assessment output:
 3. Provide remediation in execution order (create user → grant privs → authorize GG)
 4. Note variant-specific behavior (RDS users don't need to worry about archivelog)
 
+## CPAT — Cloud Premigration Advisor Tool
+
+### Overview
+
+CPAT (MOS Doc ID 2758371.1, KB139585) is Oracle's tool for evaluating source DB compatibility with ADB. The full check catalog is in `kb/cpat-checks.yaml`, extracted from CPAT 26.2.0's `check_messages.properties`.
+
+CPAT checks also run automatically during **DMS migration validation** — the "Checks" tab in the DMS Console shows the same checks. The skill can interpret both DMS Console screenshots and standalone CPAT reports.
+
+### CPAT Required Privileges (READ-ONLY)
+
+CPAT never modifies the database. Minimum privileges:
+
+```sql
+-- For a dedicated CPAT user:
+GRANT CREATE SESSION TO cpat_user;
+GRANT SELECT ANY DICTIONARY TO cpat_user;
+-- Only if NLS character set conversion check is needed:
+GRANT SELECT ON SYSTEM.DUM$COLUMNS TO cpat_user;
+GRANT SELECT ON SYSTEM.DUM$DATABASE TO cpat_user;
+-- For XTTS migration method only:
+-- GRANT EXECUTE ON SYS.DBMS_TTS TO cpat_user;
+```
+
+- When using `--sysdba` flag: OS authentication or SYS user, no additional grants needed
+- For ADB Serverless as source: grant `SELECT_CATALOG_ROLE`
+
+### CPAT Analysis Flow
+
+When the user selects **CPAT analysis** from the menu or shares DMS validation results (screenshots, JSON, or text), follow this flow:
+
+1. **Identify the checks**: Match check names from the screenshot/report to `kb/cpat-checks.yaml`
+2. **Present findings**: For each failing check, show the official rule, impact, and action from the KB
+3. **Offer fixup scripts**: For checks that have `static_fixup` or `fixup_notes`, proactively offer the SQL. For checks that CPAT can generate fixups for, recommend running CPAT with `--genfixups`
+4. **Offer to execute fixes**: Ask whether the user wants:
+   - **Scripts only** — generate SQL for manual execution
+   - **Connect to source** — run fixes on the source DB via sqlplus/sqlcl
+   - **Connect to target** — run fixes on the target ADB
+5. **Re-validate**: After fixes, suggest re-running DMS validation or CPAT to confirm resolution
+
+### CPAT Standalone Execution
+
+When the user wants to run CPAT independently (not through DMS):
+
+```bash
+# Basic analysis against source DB:
+./premigration.sh --connectstring jdbc:oracle:thin:@<host>:<port>/<service> \
+  --targetcloud ATPS --username SYSTEM --schemas TESTUSER TESTUSER1 \
+  --reportformat TEXT JSON HTML --genfixups --outdir ./cpat_output
+
+# With target properties for more accurate analysis:
+./premigration.sh --gettargetprops --username ADMIN \
+  --connectstring 'jdbc:oracle:thin:@<service>?TNS_ADMIN=<wallet-path>'
+
+./premigration.sh --connectstring jdbc:oracle:thin:@<host>:<port>/<service> \
+  --analysisprops premigration_advisor_analysis.properties \
+  --targetcloud ATPS --genfixups --outdir ./cpat_output
+```
+
+Fixup scripts are generated in `<outdir>/source/` and `<outdir>/target/` subfolders.
+
+### CPAT ZIP Auto-Refresh
+
+The CPAT zip lives at `docs/KB139585/p*.zip`. When the user drops a new version:
+
+1. Detect the changed zip (different filename or date)
+2. Extract `lib/premigration.jar` → `check_messages.properties`
+3. Parse all `CHECK.<name>.<field>=<value>` entries
+4. Regenerate `kb/cpat-checks.yaml` with updated checks
+5. Note the new version in the yaml header
+
+### Menu Integration
+
+The CPAT option should appear in the welcome menu when a journal exists, as part of the action choices:
+
+- **Analyze CPAT checks**: User shares DMS validation screenshot or CPAT report → skill interprets, offers fixes, can connect to source/target to execute
+
 ## Scope Boundaries — What the Skill Must NEVER Do
 
 - **The tool only creates/modifies/deletes DMS migrations, DMS connections, and GoldenGate deployments.** All other OCI resources (Vault, secrets, VCN, NSG, buckets, databases) must exist beforehand.
@@ -551,7 +631,7 @@ When a user shares assessment output:
 - **include_allow_objects vs exclude_objects**: Mutually exclusive per migration
 - **Assessment connector auto-detect**: Tries oracledb thin → thick → sqlplus, uses whichever works
 - **Idempotent operations**: Every step checks if resource exists before creating
-- **CPAT**: Always recommend Oracle's Cloud Premigration Advisor Tool (MOS Doc ID 2758371.1) as complement to built-in assessment
+- **CPAT**: Full check catalog in `kb/cpat-checks.yaml` (extracted from CPAT 26.2.0). Can analyze DMS validation results, offer fixup scripts, and run CPAT standalone
 
 ## Language
 
